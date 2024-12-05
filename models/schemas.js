@@ -1,4 +1,6 @@
 const mongoose = require('mongoose');
+const AutoIncrementFactory = require('mongoose-sequence');
+const AutoIncrement = AutoIncrementFactory(mongoose);
 
 const AccountSchema = new mongoose.Schema({
     id: {
@@ -18,6 +20,8 @@ const AccountSchema = new mongoose.Schema({
         default: Date.now
     }
 });
+
+AccountSchema.plugin(AutoIncrement, {inc_field: 'id'});
 
 const UserSchema = new mongoose.Schema({
     firebaseId: {
@@ -43,5 +47,61 @@ const UserSchema = new mongoose.Schema({
     accounts: {
         type: Array,
         required: false
+    }
+});
+
+const AssistantSchema = new mongoose.Schema({
+    id: {
+        type: String,
+        required: true
+    },
+    name: {
+        type: String,
+        required: true
+    },
+    ownerID: {
+        type: String,
+        required: true
+    },
+    settings: {
+        type: Object,
+        required: false
+    },
+    date: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+AssistantSchema.plugin(AutoIncrement, {inc_field: 'id'});
+
+const ConversationSchema = new mongoose.Schema({
+    id: {
+        type: String,
+        required: true
+    },
+    assistantID: {
+        type: String,
+        required: true
+    },
+    userID: {
+        type: String,
+        required: true
+    },
+    threadID: {
+        type: String,
+        required: true
+    },
+    title: {
+        type: String,
+        required: false
+    },
+    messages: {
+        type: Array,
+        required: false
+    },
+    date: {
+        type: Date,
+        default: Date.now
     }
 });
