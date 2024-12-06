@@ -4,7 +4,7 @@ const AutoIncrement = AutoIncrementFactory(mongoose);
 
 const AccountSchema = new mongoose.Schema({
     id: {
-        type: String,
+        type: Number,
         required: true
     },
     name: {
@@ -44,15 +44,15 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: Date.now
     },
-    accounts: {
-        type: Array,
-        required: false
-    }
+    accounts: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Account'
+    }]
 });
 
 const AssistantSchema = new mongoose.Schema({
     id: {
-        type: String,
+        type: Number, 
         required: true
     },
     name: {
@@ -77,7 +77,7 @@ AssistantSchema.plugin(AutoIncrement, {inc_field: 'id'});
 
 const ConversationSchema = new mongoose.Schema({
     id: {
-        type: String,
+        type: Number, 
         required: true
     },
     assistantID: {
@@ -105,3 +105,17 @@ const ConversationSchema = new mongoose.Schema({
         default: Date.now
     }
 });
+
+ConversationSchema.plugin(AutoIncrement, {inc_field: 'id'});
+
+const Account = mongoose.model('Account', AccountSchema);
+const User = mongoose.model('User', UserSchema);
+const Assistant = mongoose.model('Assistant', AssistantSchema);
+const Conversation = mongoose.model('Conversation', ConversationSchema);
+
+module.exports = {
+    Account,
+    User,
+    Assistant,
+    Conversation
+};
