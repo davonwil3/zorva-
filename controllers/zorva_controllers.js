@@ -1,6 +1,8 @@
 
 const OpenAI = require('openai');
 const openai = new OpenAI(process.env.OPENAI_API_KEY)
+const User = require('../models/schemas').User; 
+
 
 const chatbot = async (req, res) => {
     const { assistantId } = req.body; 
@@ -29,8 +31,31 @@ const chatbot = async (req, res) => {
       res.status(500).json({ error: "An error occurred while setting up the assistant." });
     }
   };
+
+  const adduser = async (req, res) => {
+    const {firebaseUid} = req.body;
+    const {email} = req.body;
+    console.log("firebaseUid:", firebaseUid);
+    try {
+        // Create a new user document
+        const newUser = new User({
+            firebaseUid,
+            email
+        });
+
+        // Save the user document to the database
+        await newUser.save();
+
+        // Send a success response
+        console.log("User added successfully");
+    } catch (error) {
+        // Handle errors
+       console.log("Error adding user:", error);
+    } 
+  };
   
 
 module.exports = {
-    chatbot
+    chatbot,
+    adduser
 }

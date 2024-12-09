@@ -3,7 +3,7 @@ const AutoIncrementFactory = require('mongoose-sequence');
 const AutoIncrement = AutoIncrementFactory(mongoose);
 
 const AccountSchema = new mongoose.Schema({
-    id: {
+    account_id: {
         type: Number,
         required: true
     },
@@ -21,20 +21,20 @@ const AccountSchema = new mongoose.Schema({
     }
 });
 
-AccountSchema.plugin(AutoIncrement, {inc_field: 'id'});
+AccountSchema.plugin(AutoIncrement, { inc_field: 'account_id' });
 
 const UserSchema = new mongoose.Schema({
-    firebaseId: {
+    firebaseUid: {
         type: String,
         required: true
     },
     firstName: {
         type: String,
-        required: true
+        required: false
     },
     lastName: {
         type: String,
-        required: true
+        required: false
     },
     email: {
         type: String,
@@ -51,7 +51,7 @@ const UserSchema = new mongoose.Schema({
 });
 
 const AssistantSchema = new mongoose.Schema({
-    id: {
+    assistant_id: {
         type: Number, 
         required: true
     },
@@ -73,10 +73,10 @@ const AssistantSchema = new mongoose.Schema({
     }
 });
 
-AssistantSchema.plugin(AutoIncrement, {inc_field: 'id'});
+AssistantSchema.plugin(AutoIncrement, { inc_field: 'assistant_id' });
 
 const ConversationSchema = new mongoose.Schema({
-    id: {
+    conversation_id: {
         type: Number, 
         required: true
     },
@@ -106,7 +106,7 @@ const ConversationSchema = new mongoose.Schema({
     }
 });
 
-ConversationSchema.plugin(AutoIncrement, {inc_field: 'id'});
+ConversationSchema.plugin(AutoIncrement, { inc_field: 'conversation_id' });
 
 const Account = mongoose.model('Account', AccountSchema);
 const User = mongoose.model('User', UserSchema);
