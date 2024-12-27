@@ -63,10 +63,36 @@ const ConversationSchema = new mongoose.Schema({
 
 ConversationSchema.plugin(AutoIncrement, { inc_field: 'conversation_id' });
 
+const FileRecordSchema = new mongoose.Schema({
+    fileId: {
+      type: String,
+      required: true,
+      unique: true
+    },
+    filename: {
+      type: String,
+      required: true
+    },
+    sheetFileIds: [String],
+    userId: {
+      type: String,
+      ref: 'User'
+    },
+    vectorStoreId: {
+      type: String
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  });
+
+const FileRecord = mongoose.model('FileRecord', FileRecordSchema);
 const User = mongoose.model('User', UserSchema);
 const Conversation = mongoose.model('Conversation', ConversationSchema);
 
 module.exports = {
     User,
-    Conversation
+    Conversation,
+    FileRecord
 };
