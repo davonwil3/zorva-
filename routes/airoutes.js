@@ -1,10 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { adduser } = require('../controllers/zorva_controllers');
-const { uploadfiles } = require('../controllers/zorva_controllers');
+const { adduser, uploadFiles } = require('../controllers/zorva_controllers');
 
-module.exports = (upload) => {
+const setupRoutes = (upload) => {
     router.post('/adduser', adduser);
-    router.post('/uploadfiles', upload.array('files'), uploadfiles);
+    router.post('/uploadfiles', upload.array('files'), uploadFiles);
     return router;
 };
+
+module.exports = setupRoutes;
