@@ -3,7 +3,7 @@ const OpenAI = require('openai');
 const openai = new OpenAI(process.env.OPENAI_API_KEY)
 const User = require('../models/schemas').User;
 const fs = require('fs');
-const XLSX = require('xlsx');
+const xlsx = require('xlsx');
 const csv = require('csv-parse');
 const { promisify } = require('util');
 const path = require('path');
@@ -14,17 +14,32 @@ const parseCSV = promisify(csv.parse);
 const adduser = async (req, res) => {
   const { firebaseUid, email } = req.body;
   console.log("firebaseUid:", firebaseUid);
+  let assistantID;
 
   try {
     // 1. Create the assistant
-    const assistant = await openai.beta.assistants.create({
-      name: "Zorva assistant",
+    const filesearchassistant = await openai.beta.assistants.create({
+      name: "Zorva assistant file search",
+      instructions: `
+      You are a file search assistant. Your role is to:
+      - Parse the user's query to identify search intent.
+      - Search the indexed files for relevant matches based on the query.
+      - Provide the user with the relevant file citations.
+    `,
+      model: "gpt-4o",
+      tools: [{ type: "file_search" }],
+    });
+    const filesearchID = filesearchassistant.id;
+    console.log("Created new file assistant with ID:", assistantID);
+
+    const dataanalysisassistant = await openai.beta.assistants.create({
+      name: "Zorva assistant data analysis",
       instructions: "You are an expert data analytics advisor that gives insights about data.",
       model: "gpt-4o",
       tools: [{ type: "file_search" }],
     });
-    const assistantID = assistant.id;
-    console.log("Created new assistant with ID:", assistantID);
+    const dataanalysisID = dataanalysisassistant.id;
+    console.log("Created new data assistant with ID:", dataanalysisID);
 
     // 2. Create an empty vector store
     let vectorStore;
@@ -42,17 +57,26 @@ const adduser = async (req, res) => {
     console.log("Vector Store ID:", vectorStoreID);
 
     try {
-      await openai.beta.assistants.update(assistantID, {
+      await openai.beta.assistants.update(filesearchID, {
         tool_resources: {
           file_search: { vector_store_ids: [vectorStoreID] },
         },
       });
-      console.log("Attached vector store to assistant:", assistantID);
+      await openai.beta.assistants.update(dataanalysisID, {
+        tool_resources: {
+          file_search: { vector_store_ids: [vectorStoreID] },
+        },
+      });
+      console.log("Attached vector store to assistants:");
     } catch (error) {
       console.error("Error attaching vector store:", error);
       return res.status(500).send("Failed to attach vector store to assistant");
     }
 
+    assistantID = {
+      filesearchID: filesearchID,
+      dataanalysisID: dataanalysisID,
+    };
     // 4. Create a new user document in the database
     const newUser = new User({
       firebaseUid,
@@ -91,72 +115,21 @@ const uploadFiles = async (req, res) => {
     console.log('req.files:', req.files);
 
     const newFileIds = [];
-    const processedData = [];
 
     for (const file of req.files) {
       // If Excel or CSV
       if (/\.(xlsx|xls|csv)$/i.test(file.originalname)) {
-        const jsonData = await convertToJSON(file);
-        if (jsonData) {
-          const fileMetadata = {
-            originalName: jsonData.originalName,
-            fileName: jsonData.fileName,
-            extension: jsonData.extension,
-            sheetNames: jsonData.sheetNames,
-            uploadDate: new Date().toISOString(),
-            recordCounts: {}
-          };
-
-          for (const [sheetName, data] of Object.entries(jsonData.sheets)) {
-            fileMetadata.recordCounts[sheetName] = data.length;
-          }
-
-          // Collect all sheet-file IDs in an array
-          const sheetFileIds = [];
-
-          await Promise.all(
-            Object.entries(jsonData.sheets).map(async ([sheetName, sheetData]) => {
-              const tempFilePath = `/tmp/${jsonData.fileName}-${sheetName}-${Date.now()}.json`;
-              await fs.promises.writeFile(
-                tempFilePath,
-                JSON.stringify(
-                  {
-                    metadata: { ...fileMetadata, currentSheet: sheetName },
-                    data: sheetData
-                  },
-                  null,
-                  2
-                )
-              );
-              const response = await openai.files.create({
-                file: fs.createReadStream(tempFilePath),
-                purpose: 'assistants'
-              });
-              sheetFileIds.push(response.id);
-              await fs.promises.unlink(tempFilePath);
-            })
-          );
-
-          const newFileRecord = new FileRecord({
-            fileId: sheetFileIds[0],
-            filename: jsonData.originalName,
-            userId: user.firebaseUid,
-            vectorStoreId,
-            sheetFileIds
+        try {
+          const newFilePath = await convertToJSON(file);
+          const response = await openai.files.create({
+            file: fs.createReadStream(newFilePath),
+            purpose: 'assistants'
           });
-          try {
-            await newFileRecord.save();
-            console.log('FileRecord saved successfully:', newFileRecord);
-          } catch (error) {
-            console.error('Error saving FileRecord:', error);
-          }
 
-          newFileIds.push(...sheetFileIds);
-
-          processedData.push({
-            ...fileMetadata,
-            fileIds: sheetFileIds
-          });
+          newFileIds.push(response.id);
+          console.log(`Converted and saved as: ${newFilePath}`);
+        } catch (error) {
+          console.error(`Error converting file: ${file.originalname}`, error);
         }
       } else {
         // For non-Excel/CSV files
@@ -165,24 +138,7 @@ const uploadFiles = async (req, res) => {
           purpose: 'assistants'
         });
 
-        const newFileRecord = new FileRecord({
-          fileId: response.id,
-          filename: file.originalname,
-          userId: user.firebaseUid,
-          vectorStoreId
-        });
-        try {
-          await newFileRecord.save();
-          console.log('FileRecord saved successfully:', newFileRecord);
-        } catch (error) {
-          console.error('Error saving FileRecord:', error);
-        }
-
         newFileIds.push(response.id);
-        processedData.push({
-          originalName: file.originalname,
-          fileIds: [response.id]
-        });
       }
     }
 
@@ -196,11 +152,8 @@ const uploadFiles = async (req, res) => {
       fs.unlinkSync(file.path);
     }
 
-    console.log('Files processed and uploaded:', processedData);
-
     return res.status(200).json({
       message: 'Files uploaded and vector store updated successfully',
-      processedFiles: processedData
     });
   } catch (error) {
     console.error('Error processing files:', error);
@@ -209,56 +162,42 @@ const uploadFiles = async (req, res) => {
 };
 
 const convertToJSON = async (file) => {
-  if (!file || !file.path) {
-    throw new Error('Invalid file or missing file path.');
-  }
-  const ext = path.extname(file.originalname).toLowerCase();
-  if (!['.xlsx', '.xls', '.csv'].includes(ext)) {
-    throw new Error(`Unsupported file extension: ${ext}`);
-  }
+  const filePath = file.path;
+  const fileExtension = path.extname(file.originalname).toLowerCase();
 
-  let workbook;
-  try {
-    const fileBuffer = await fs.promises.readFile(file.path);
-    if (ext === '.csv') {
-      const csvData = fileBuffer.toString('utf8');
-      const rows = csvData.split('\n').map((row) => row.split(','));
-      const worksheet = XLSX.utils.aoa_to_sheet(rows);
-      workbook = {
-        SheetNames: ['Sheet1'],
-        Sheets: { Sheet1: worksheet },
-      };
-    } else {
-      workbook = XLSX.read(fileBuffer, { type: 'buffer' });
-    }
-  } catch (err) {
-    console.error('Error reading or parsing file:', err);
-    throw new Error('Failed to read or parse the file. Please ensure it is a valid Excel/CSV.');
-  }
+  let jsonData = [];
 
-  const sheetNames = workbook.SheetNames || [];
-  if (sheetNames.length === 0) {
-    throw new Error('No sheets found in the workbook.');
-  }
+  if (fileExtension === '.csv') {
+    // Read CSV file
+    const data = fs.readFileSync(filePath, 'utf-8');
+    const rows = data.split('\n');
+    const headers = rows[0].split(',');
 
-  const sheets = {};
-  for (const sheetName of sheetNames) {
-    const worksheet = workbook.Sheets[sheetName];
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
-      defval: '',
-      raw: false,
+    jsonData = rows.slice(1).map(row => {
+      const values = row.split(',');
+      return headers.reduce((acc, header, index) => {
+        acc[header.trim()] = values[index].trim();
+        return acc;
+      }, {});
     });
-    sheets[sheetName] = jsonData;
+  } else if (fileExtension === '.xlsx' || fileExtension === '.xls') {
+    // Read Excel file
+    const workbook = xlsx.readFile(filePath);
+    const sheetNames = workbook.SheetNames;
+    jsonData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetNames[0]]);
+  } else {
+    throw new Error('Unsupported file format');
   }
 
-  return {
-    originalName: file.originalname,
-    fileName: file.filename,
-    extension: ext,
-    sheetNames,
-    sheets,
-  };
+  // Create new JSON file with updated name
+  const newFileName = `${file.originalname}.json`;
+  const newFilePath = path.join(path.dirname(filePath), newFileName);
+
+  fs.writeFileSync(newFilePath, JSON.stringify(jsonData, null, 2));
+
+  return newFilePath;
 };
+
 
 
 const getfiles = async (req, res) => {
@@ -274,28 +213,95 @@ const getfiles = async (req, res) => {
     // Retrieve files from the vector store
     const storeFiles = await openai.beta.vectorStores.files.list(vectorStoreId);
 
-    // Match each vector store file with our local FileRecord for the filename
+    // Extract file IDs from the vector store files
+    const fileIds = storeFiles.data.map((file) => file.id);
+
+    // Retrieve file metadata from OpenAI Files API
     const filesWithMetadata = await Promise.all(
-      storeFiles.data.map(async (file) => {
-        const localRecord = await FileRecord.findOne({ fileId: file.id });
+      fileIds.map(async (fileId) => {
+        const file = await openai.files.retrieve(fileId);
         return {
           id: file.id,
-          filename: localRecord ? localRecord.filename : '(No filename)',
+          filename: file.filename || '(No filename)', // Retrieve filename from OpenAI Files API
           created_at: file.created_at,
-          usage_bytes: file.usage_bytes || 0
+          usage_bytes: file.bytes || 0, // Adjusted property name for consistency
         };
       })
     );
 
     return res.status(200).json({ files: filesWithMetadata });
   } catch (error) {
-    console.error('Error fetching files:', error);
-    return res.status(500).send('Error fetching files');
+    console.error('Error fetching vector files:', error);
+    return res.status(500).send('Error fetching vector files');
   }
 };
+
+const search = async (req, res) => {
+  try {
+    const { firebaseUid, query, searchByFilename } = req.body; // Add searchByFilename flag
+    const user = await User.findOne({ firebaseUid });
+    const filesearchID = user.assistantID.filesearchID;
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    let citations = [];
+
+    // Content-based search
+    // Step 1: Create a Thread
+    const thread = await openai.beta.threads.create({
+      messages: [
+        {
+          role: "user",
+          content: query,
+        },
+      ],
+    });
+
+    // Step 2: Send a message
+    const run = await openai.beta.threads.runs.createAndPoll(thread.id, {
+      assistant_id: filesearchID,
+    });
+
+    // Step 3: Get the response
+    const messages = await openai.beta.threads.messages.list(thread.id, {
+      run_id: run.id,
+    });
+
+    const message = messages.data.pop();
+    if (message?.content[0].type === "text") {
+      const { text } = message.content[0];
+      const { annotations } = text;
+    
+      let index = 0;
+      for (const annotation of annotations) {
+        text.value = text.value.replace(annotation.text, `[${index}]`);
+    
+        // Safely access file_citation.file_id
+        if (annotation.file_citation && annotation.file_citation.file_id) {
+          citations.push(annotation.file_citation.file_id);
+        }
+    
+        index++;
+      }
+    
+      console.log("Matched Text:", text.value);
+    }
+  
+    console.log("Citations:", citations);
+    return res.status(200).json({ fileIDs: citations });
+  } catch (error) {
+    console.error("Error searching:", error);
+    return res.status(500).send("Error searching");
+  }
+};
+
+
 
 module.exports = {
   adduser,
   uploadFiles,
-  getfiles
+  getfiles,
+  search
 }
