@@ -236,6 +236,54 @@ const getfiles = async (req, res) => {
   }
 };
 
+const getfilesbyID = async (req, res) => {
+  try {
+    const { firebaseUid, fileIDs } = req.body;
+
+    // Validate input
+    if (!firebaseUid || !Array.isArray(fileIDs)) {
+      return res.status(400).json({ error: 'Invalid request data' });
+    }
+
+    const user = await User.findOne({ firebaseUid });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const vectorStoreId = user.vectorStoreID;
+
+    // Get data for the files that match the fileIDs
+    const filesWithMetadata = await Promise.all(
+      fileIDs.map(async (fileId) => {
+        const file = await openai.files.retrieve(fileId);
+
+        if (!file) {
+          throw new Error(`File with ID ${fileId} not found.`);
+        }
+
+        // Fetch the file content
+        const fileContent = await openai.files.download(fileId);
+
+        return {
+          id: file.id,
+          filename: file.filename || '(No filename)', // Retrieve filename from OpenAI Files API
+          created_at: file.created_at,
+          usage_bytes: file.bytes || 0, // Adjusted property name for consistency
+          data: fileContent.data // File content is fetched here
+        };
+      })
+    );
+
+    // Respond with the files and their metadata
+    res.status(200).json({ files: filesWithMetadata });
+  } catch (error) {
+    console.error('Error fetching files:', error.message);
+    res.status(500).json({ error: error.message || 'An error occurred' });
+  }
+};
+
+
 const search = async (req, res) => {
   try {
     const { firebaseUid, query, searchByFilename } = req.body; // Add searchByFilename flag
@@ -273,22 +321,22 @@ const search = async (req, res) => {
     if (message?.content[0].type === "text") {
       const { text } = message.content[0];
       const { annotations } = text;
-    
+
       let index = 0;
       for (const annotation of annotations) {
         text.value = text.value.replace(annotation.text, `[${index}]`);
-    
+
         // Safely access file_citation.file_id
         if (annotation.file_citation && annotation.file_citation.file_id) {
           citations.push(annotation.file_citation.file_id);
         }
-    
+
         index++;
       }
-    
+
       console.log("Matched Text:", text.value);
     }
-  
+
     console.log("Citations:", citations);
     return res.status(200).json({ fileIDs: citations });
   } catch (error) {
@@ -303,5 +351,6 @@ module.exports = {
   adduser,
   uploadFiles,
   getfiles,
-  search
+  search,
+  getfilesbyID
 }
