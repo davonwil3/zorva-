@@ -7,7 +7,13 @@ const xlsx = require('xlsx');
 const csv = require('csv-parse');
 const { promisify } = require('util');
 const path = require('path');
-const FileRecord = require('../models/schemas').FileRecord;
+const AWS = require('aws-sdk');
+
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION, 
+});
 
 const parseCSV = promisify(csv.parse);
 
@@ -117,34 +123,40 @@ const uploadFiles = async (req, res) => {
     const newFileIds = [];
 
     for (const file of req.files) {
-      // If Excel or CSV
-      if (/\.(xlsx|xls|csv)$/i.test(file.originalname)) {
-        try {
-          const newFilePath = await convertToJSON(file);
-          const response = await openai.files.create({
-            file: fs.createReadStream(newFilePath),
-            purpose: 'assistants'
-          });
+      let response;
+      let openAiFileId;
 
-          newFileIds.push(response.id);
-          console.log(`Converted and saved as: ${newFilePath}`);
-        } catch (error) {
-          console.error(`Error converting file: ${file.originalname}`, error);
-        }
-      } else {
-        // For non-Excel/CSV files
-        const response = await openai.files.create({
-          file: fs.createReadStream(file.path),
-          purpose: 'assistants'
+      // Upload to OpenAI
+      if (/\\.(xlsx|xls|csv)$/i.test(file.originalname)) {
+        const newFilePath = await convertToJSON(file);
+        response = await openai.files.create({
+          file: fs.createReadStream(newFilePath),
+          purpose: 'fine-tune',
         });
-
-        newFileIds.push(response.id);
+      } else {
+        response = await openai.files.create({
+          file: fs.createReadStream(file.path),
+          purpose: 'fine-tune',
+        });
       }
+
+      openAiFileId = response.id;
+      newFileIds.push(openAiFileId);
+
+      // Upload to AWS S3 using OpenAI file ID as the key
+      const s3Params = {
+        Bucket: process.env.AWS_BUCKET_NAME,
+        Key: `uploads/${openAiFileId}`, // Use OpenAI file ID as S3 key
+        Body: fs.createReadStream(file.path),
+      };
+
+      await s3.upload(s3Params).promise();
+      console.log(`File uploaded to S3 with OpenAI ID: ${openAiFileId}`);
     }
 
-    // Add these new files to the vector store
+    // Add files to the vector store
     await openai.beta.vectorStores.fileBatches.createAndPoll(vectorStoreId, {
-      file_ids: newFileIds
+      file_ids: newFileIds,
     });
 
     // Clean up local files
@@ -153,13 +165,14 @@ const uploadFiles = async (req, res) => {
     }
 
     return res.status(200).json({
-      message: 'Files uploaded and vector store updated successfully',
+      message: 'Files uploaded to S3 and OpenAI successfully',
     });
   } catch (error) {
     console.error('Error processing files:', error);
     return res.status(500).send('Error processing files');
   }
 };
+
 
 const convertToJSON = async (file) => {
   const filePath = file.path;
@@ -251,26 +264,24 @@ const getfilesbyID = async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const vectorStoreId = user.vectorStoreID;
-
-    // Get data for the files that match the fileIDs
+    // Get metadata and content for the files
     const filesWithMetadata = await Promise.all(
       fileIDs.map(async (fileId) => {
-        const file = await openai.files.retrieve(fileId);
+        const fileMetadata = await openai.files.retrieve(fileId);
 
-        if (!file) {
+        if (!fileMetadata) {
           throw new Error(`File with ID ${fileId} not found.`);
         }
 
-        // Fetch the file content
-        const fileContent = await openai.files.download(fileId);
+        // Fetch file content
+        const fileContent = await openai.files.content(fileId);
 
         return {
-          id: file.id,
-          filename: file.filename || '(No filename)', // Retrieve filename from OpenAI Files API
-          created_at: file.created_at,
-          usage_bytes: file.bytes || 0, // Adjusted property name for consistency
-          data: fileContent.data // File content is fetched here
+          id: fileMetadata.id,
+          filename: fileMetadata.filename || '(No filename)',
+          created_at: fileMetadata.created_at,
+          usage_bytes: fileMetadata.bytes || 0,
+          data: fileContent, // File content is directly fetched here
         };
       })
     );
@@ -282,6 +293,7 @@ const getfilesbyID = async (req, res) => {
     res.status(500).json({ error: error.message || 'An error occurred' });
   }
 };
+
 
 
 const search = async (req, res) => {

@@ -69,12 +69,12 @@ const ConversationSchema = new mongoose.Schema({
 
 ConversationSchema.plugin(AutoIncrement, { inc_field: 'conversation_id' });
 
-
 const User = mongoose.model('User', UserSchema);
 const Conversation = mongoose.model('Conversation', ConversationSchema);
 
 module.exports = {
     User,
     Conversation,
-    
+    File
+
 };
