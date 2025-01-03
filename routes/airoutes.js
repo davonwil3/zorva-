@@ -4,6 +4,7 @@ const { adduser, uploadFiles } = require('../controllers/zorva_controllers');
 const { getfiles } = require('../controllers/zorva_controllers');
 const { search } = require('../controllers/zorva_controllers');
 const { getFilesByID } = require('../controllers/zorva_controllers');
+const { deletefile } = require('../controllers/zorva_controllers');
 
 const setupRoutes = (upload) => {
     router.post('/adduser', adduser);
@@ -11,6 +12,7 @@ const setupRoutes = (upload) => {
     router.post('/search', search);
     router.post('/getfiles', getfiles);
     router.post('/getfilesbyID', getFilesByID);
+    router.post('/deletefile', deletefile);
     return router;
 };
 

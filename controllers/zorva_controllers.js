@@ -7,7 +7,9 @@ const xlsx = require('xlsx');
 const { promisify } = require('util');
 const path = require('path');
 const AWS = require('aws-sdk');
-const mime = require('mime-types'); // Add this dependency to handle MIME types
+const mime = require('mime-types'); 
+const cache = require('./cache');
+
 
 // Configure AWS SDK
 const s3 = new AWS.S3({
@@ -317,6 +319,7 @@ const getfiles = async (req, res) => {
   }
 };
 
+// The main function to handle fetching files by ID
 const getFilesByID = async (req, res) => {
   try {
     const { firebaseUid, fileIDs } = req.body;
@@ -326,6 +329,7 @@ const getFilesByID = async (req, res) => {
       return res.status(400).json({ error: 'Invalid request data' });
     }
 
+    // Fetch user based on firebaseUid
     const user = await User.findOne({ firebaseUid });
 
     console.log('Fetching files for user:', user);
@@ -334,14 +338,42 @@ const getFilesByID = async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Helper function to get or set signed URL in cache
+    const getSignedUrl = async (fileId, key) => {
+      const cacheKey = `signedUrl:${fileId}`;
+
+      // Attempt to get the URL from the cache
+      const cachedUrl = cache.get(cacheKey);
+      if (cachedUrl) {
+        console.log(`Cache hit for file ID ${fileId}`);
+        return cachedUrl;
+      }
+
+      console.log(`Cache miss for file ID ${fileId}. Generating new signed URL.`);
+
+      // Generate a signed URL with 1-hour expiration
+      const url = s3.getSignedUrl('getObject', {
+        Bucket: process.env.AWS_BUCKET_NAME,
+        Key: key,
+        Expires: 3600, // 1 hour in seconds
+        ResponseContentDisposition: 'inline',
+      });
+
+      // Store the signed URL in the cache
+      cache.set(cacheKey, url);
+      console.log(`Generated and cached new signed URL for file ID ${fileId}`);
+
+      return url;
+    };
+
     // Fetch files from S3 based on fileIDs
     const filesWithMetadata = await Promise.all(
       fileIDs.map(async (fileId) => {
-        const key = `uploads/${fileId}`; // Use exact key structure based on your S3
+        const key = `uploads/${fileId}`; // Ensure this matches your S3 object keys
         console.log('Attempting to fetch file with Key:', key);
 
         const params = {
-          Bucket: process.env.AWS_BUCKET_NAME, // Your bucket name
+          Bucket: process.env.AWS_BUCKET_NAME, // Ensure this is set to "zorvauploads"
           Key: key,
         };
 
@@ -349,28 +381,27 @@ const getFilesByID = async (req, res) => {
           // Check if the file exists and retrieve metadata
           const fileData = await s3.headObject(params).promise();
 
-          // Generate a signed URL for the file
-          const url = s3.getSignedUrl('getObject', {
-            Bucket: process.env.AWS_BUCKET_NAME,
-            Key: key,
-            Expires: 3600, // URL expires in 1 hour
-          });
-
-          const file = await openai.files.retrieve(fileId);
+          // Get or generate signed URL from cache
+          const url = await getSignedUrl(fileId, key);
 
           console.log('File metadata:', fileData);
           console.log('Signed URL:', url);
 
           return {
             id: fileId,
-            filename: file.filename || '(No filename)',
+            filename: fileData.Metadata?.filename || fileId, // Assuming you store filename in metadata
             contentType: fileData.ContentType || 'unknown',
             contentLength: fileData.ContentLength || 0,
             data: url, // Return the signed URL
           };
         } catch (err) {
-          console.error(`Error fetching file with ID ${fileId}:`, err.message);
-          throw new Error(`File with ID ${fileId} not found in S3.`);
+          if (err.code === 'NotFound') {
+            console.error(`File with ID ${fileId} not found in S3.`);
+            throw new Error(`File with ID ${fileId} not found.`);
+          } else {
+            console.error(`Error fetching file with ID ${fileId}:`, err.message);
+            throw new Error(`Unable to retrieve file with ID ${fileId}.`);
+          }
         }
       })
     );
@@ -383,20 +414,26 @@ const getFilesByID = async (req, res) => {
   }
 };
 
+
 const search = async (req, res) => {
   try {
     const { firebaseUid, query, searchByFilename } = req.body; // Add searchByFilename flag
-    const user = await User.findOne({ firebaseUid });
-    const filesearchID = user.assistantID.filesearchID;
 
+    // Step 1: Fetch the user and verify existence
+    const user = await User.findOne({ firebaseUid });
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    const filesearchID = user.assistantID?.filesearchID;
+    if (!filesearchID) {
+      return res.status(400).json({ error: 'filesearchID not found for user' });
+    }
+
     let citations = [];
 
-    // Content-based search
-    // Step 1: Create a Thread
+    // Step 2: Create a thread
+    console.log("Creating thread with query:", query);
     const thread = await openai.beta.threads.create({
       messages: [
         {
@@ -406,43 +443,97 @@ const search = async (req, res) => {
       ],
     });
 
-    // Step 2: Send a message
+    if (!thread || !thread.id) {
+      throw new Error("Thread creation failed");
+    }
+
+    console.log("Thread created successfully:", thread);
+
+    // Step 3: Send a message and poll the result
+    console.log("Running assistant with filesearchID:", filesearchID);
     const run = await openai.beta.threads.runs.createAndPoll(thread.id, {
       assistant_id: filesearchID,
+      max_completion_tokens: 500, // Adjust based on expected output size
     });
+    if (!run || !run.id) {
+      throw new Error("Run creation failed");
+    }
 
-    // Step 3: Get the response
+    // Step 4: Retrieve the response messages
     const messages = await openai.beta.threads.messages.list(thread.id, {
       run_id: run.id,
     });
 
-    const message = messages.data.pop();
-    if (message?.content[0].type === "text") {
-      const { text } = message.content[0];
-      const { annotations } = text;
-
-      let index = 0;
-      for (const annotation of annotations) {
-        text.value = text.value.replace(annotation.text, `[${index}]`);
-
-        // Safely access file_citation.file_id
-        if (annotation.file_citation && annotation.file_citation.file_id) {
-          citations.push(annotation.file_citation.file_id);
-        }
-
-        index++;
-      }
-
-      console.log("Matched Text:", text.value);
+    if (!messages || messages.data.length === 0) {
+      throw new Error("No messages returned from the assistant");
     }
 
-    console.log("Citations:", citations);
+    // Step 5: Process the latest message to extract citations
+    const message = messages.data.pop();
+    if (message?.content?.[0]?.type === "text") {
+      const { text } = message.content[0];
+      const { annotations } = text || {};
+
+      if (!annotations || annotations.length === 0) {
+        console.log("No annotations found in the response text");
+      } else {
+        let index = 0;
+        for (const annotation of annotations) {
+          if (annotation.file_citation?.file_id) {
+            citations.push(annotation.file_citation.file_id);
+          }
+          index++;
+        }
+      }
+    } else {
+      console.log("Message content is missing or invalid");
+    }
+
+    console.log("Citations extracted:", citations);
     return res.status(200).json({ fileIDs: citations });
   } catch (error) {
-    console.error("Error searching:", error);
-    return res.status(500).send("Error searching");
+    console.error("Error in search function:", error);
+    return res.status(500).json({ error: "Error processing search request" });
   }
 };
+
+
+// delete files from s3 and openai
+const deletefile = async (req, res) => {
+  try {
+    const { firebaseUid, fileID } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const vectorStoreId = user.vectorStoreID;
+
+    // Delete file from OpenAI
+    await openai.files.del(fileID);
+    await openai.beta.vectorStores.files.del(vectorStoreId, fileID);
+
+    console.log(`File deleted from OpenAI with ID: ${fileID}`);
+
+    // Delete file from S3
+    const key = `uploads/${fileID}`;
+    const params = {
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: key,
+    };
+
+    await s3.deleteObject(params).promise();
+    console.log(`File deleted from S3 with Key: ${key}`);
+
+    return res.status(200).json({ message: 'File deleted successfully from s3' });
+  }
+  catch (error) {
+    console.error('Error deleting file:', error);
+    return res.status(500).send('Error deleting file');
+  }
+}
+
+
 
 
 
@@ -452,4 +543,5 @@ module.exports = {
   getfiles,
   search,
   getFilesByID,
+  deletefile
 }
