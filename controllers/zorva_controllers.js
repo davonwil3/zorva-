@@ -7,8 +7,9 @@ const xlsx = require('xlsx');
 const { promisify } = require('util');
 const path = require('path');
 const AWS = require('aws-sdk');
-const mime = require('mime-types'); 
+const mime = require('mime-types');
 const cache = require('./cache');
+const Conversations = require('../models/schemas').Conversations;
 
 
 // Configure AWS SDK
@@ -41,7 +42,26 @@ const adduser = async (req, res) => {
 
     const dataanalysisassistant = await openai.beta.assistants.create({
       name: "Zorva assistant data analysis",
-      instructions: "You are an expert data analytics advisor that gives insights about data.",
+      instructions: `
+      You are an expert data analytics advisor. Your role is to assist users by analyzing data from various files. 
+      You should leverage your file search tool to find relevant data in the uploaded documents and use that data to answer users' questions.
+
+      When users upload a file:
+      - Provide an overview of the data, including the number of rows, columns, column names, and types.
+      - Offer a preview of the first few rows of data.
+      - Suggest potential analyses based on the data (e.g., summary statistics, correlations, trends, etc.).
+      
+      When users ask a question about the data:
+      - Use the file search tool to locate relevant data and respond with insights.
+      - If needed, perform calculations such as averages, sums, or standard deviations.
+      - Provide relevant visualizations (charts, graphs) when necessary.
+
+      If the data contains issues (e.g., missing values, duplicates):
+      - Alert the user about these issues and offer recommendations to fix them.
+      - If appropriate, suggest data cleaning options like removing duplicates or filling missing values.
+
+      Always be proactive in suggesting further analyses or data insights based on what the user asks, and provide clear, easy-to-understand explanations.
+  `,
       model: "gpt-4o",
       tools: [{ type: "file_search" }],
     });
@@ -533,9 +553,116 @@ const deletefile = async (req, res) => {
   }
 }
 
+// chat with the assistant
+const chat = async (req, res) => {
+  try {
+    const { firebaseUid, query } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    const threadID = req.body.threadID;
+    const title = req.body.title;
 
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
+    const assistantID = user.assistantID.dataanalysisID;
 
+    if (!assistantID) {
+      return res.status(400).json({ error: 'Assistant ID not found for user' });
+    }
+
+    // Create a thread
+    if (!threadID) {
+      const thread = await openai.beta.threads.create({
+        messages: [
+          {
+            role: 'user',
+            content: query,
+          },
+        ],
+      });
+
+      if (!thread || !thread.id) {
+        throw new Error('Thread creation failed');
+      }
+
+      // save the thread to the database
+      const newConversation = new Conversations({
+        conversation_id: 1,
+        assistantID: assistantID,
+        userID: firebaseUid,
+        threadID: thread.id,
+        title: title,
+      });
+
+      await newConversation.save();
+
+      console.log('Thread created successfully:', thread);
+
+      threadID = thread.id;
+    }
+    // run the thread
+    const run = await openai.beta.threads.runs.createAndPoll(threadID, {
+      assistant_id: assistantID,
+      max_completion_tokens: 150,
+    });
+
+    if (!run || !run.id) {
+      throw new Error('Run creation failed');
+    }
+
+    // Retrieve the response messages
+    const messages = await openai.beta.threads.messages.list(threadID, {
+      run_id: run.id,
+    });
+
+    if (!messages || messages.data.length === 0) {
+      throw new Error('No messages returned from the assistant');
+    }
+
+    const response = messages.data.pop();
+    const content = response.content[0].text;
+
+    return res.status(200).json({ response: content });
+  }
+  catch (error) {
+    console.error('Error in chat function:', error);
+    return res.status(500).json({ error: 'Error processing chat request' });
+  }
+}
+
+// list all messages in a conversation
+const listMessages = async (req, res) => {
+  try {
+    const { firebaseUid, threadID } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    const assistantID = user.assistantID.dataanalysisID;
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (!assistantID) {
+      return res.status(400).json({ error: 'Assistant ID not found for user' });
+    }
+
+    // retrieve the messages in the thread
+    const messages = await openai.beta.threads.messages.list(threadID, {
+      assistant_id: assistantID,
+    });
+
+    if (!messages || messages.data.length === 0) {
+      throw new Error('No messages returned from the assistant');
+    }
+
+    console.log('Messages:', messages.data);
+
+    return res.status(200).json({ messages: messages.data });
+  }
+  catch (error) {
+    console.error('Error in listMessages function:', error);
+    return res.status(500).json({ error: 'Error processing listMessages request' });
+  }
+}
 
 module.exports = {
   adduser,
@@ -543,5 +670,7 @@ module.exports = {
   getfiles,
   search,
   getFilesByID,
-  deletefile
+  deletefile,
+  chat,
+  listMessages,
 }
