@@ -44,24 +44,11 @@ const adduser = async (req, res) => {
       name: "Zorva assistant data analysis",
       instructions: `
       You are an expert data analytics advisor. Your role is to assist users by analyzing data from various files. 
-      You should leverage your file search tool to find relevant data in the uploaded documents and use that data to answer users' questions.
-
-      When users upload a file:
-      - Provide an overview of the data, including the number of rows, columns, column names, and types.
-      - Offer a preview of the first few rows of data.
-      - Suggest potential analyses based on the data (e.g., summary statistics, correlations, trends, etc.).
-      
-      When users ask a question about the data:
-      - Use the file search tool to locate relevant data and respond with insights.
-      - If needed, perform calculations such as averages, sums, or standard deviations.
-      - Provide relevant visualizations (charts, graphs) when necessary.
-
-      If the data contains issues (e.g., missing values, duplicates):
-      - Alert the user about these issues and offer recommendations to fix them.
-      - If appropriate, suggest data cleaning options like removing duplicates or filling missing values.
-
-      Always be proactive in suggesting further analyses or data insights based on what the user asks, and provide clear, easy-to-understand explanations.
-  `,
+      When users ask about specific data or files already in the system:
+      - Check the vector store for any files relevant to the query.
+      - Use the file search tool to locate the most relevant data within these files.
+      - Analyze the found data to respond to the user's query.
+`,      
       model: "gpt-4o",
       tools: [{ type: "file_search" }],
     });
@@ -558,7 +545,7 @@ const chat = async (req, res) => {
   try {
     const { firebaseUid, query } = req.body;
     const user = await User.findOne({ firebaseUid });
-    const threadID = req.body.threadID;
+    let { threadID } = req.body;
     const title = req.body.title;
 
     if (!user) {
@@ -571,7 +558,7 @@ const chat = async (req, res) => {
       return res.status(400).json({ error: 'Assistant ID not found for user' });
     }
 
-    // Create a thread
+    // Create a new thread if threadID is missing
     if (!threadID) {
       const thread = await openai.beta.threads.create({
         messages: [
@@ -586,7 +573,7 @@ const chat = async (req, res) => {
         throw new Error('Thread creation failed');
       }
 
-      // save the thread to the database
+      // Save the thread to your database
       const newConversation = new Conversations({
         conversation_id: 1,
         assistantID: assistantID,
@@ -596,15 +583,22 @@ const chat = async (req, res) => {
       });
 
       await newConversation.save();
-
       console.log('Thread created successfully:', thread);
 
       threadID = thread.id;
+    } 
+    // Otherwise, append the new user message to the existing thread
+    else {
+      await openai.beta.threads.messages.create(threadID, {
+        role: 'user',
+        content: query,
+      });
     }
-    // run the thread
+
+    // Run the thread
     const run = await openai.beta.threads.runs.createAndPoll(threadID, {
       assistant_id: assistantID,
-      max_completion_tokens: 150,
+      max_completion_tokens: 2000,
     });
 
     if (!run || !run.id) {
@@ -620,16 +614,19 @@ const chat = async (req, res) => {
       throw new Error('No messages returned from the assistant');
     }
 
+    // Extract the assistant’s final message
     const response = messages.data.pop();
-    const content = response.content[0].text;
+    const content = response.content[0].text.value;
 
-    return res.status(200).json({ response: content });
-  }
+    console.log('Response from assistant:', content);
+
+    return res.status(200).json({ response: content, threadID });
+  } 
   catch (error) {
     console.error('Error in chat function:', error);
     return res.status(500).json({ error: 'Error processing chat request' });
   }
-}
+};
 
 // list all messages in a conversation
 const listMessages = async (req, res) => {
