@@ -61,6 +61,20 @@ const ConversationSchema = new mongoose.Schema({
         type: String,
         required: false
     },
+    savedInsights: [{
+        text: {
+            type: String,
+            required: true
+        },
+        data: {
+            type: String,
+            required: false
+        },
+        fileReference: {
+            type: String,
+            required: false
+        },
+    }],
     date: {
         type: Date,
         default: Date.now

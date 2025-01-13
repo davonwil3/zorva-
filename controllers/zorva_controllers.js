@@ -48,7 +48,7 @@ const adduser = async (req, res) => {
       - Check the vector store for any files relevant to the query.
       - Use the file search tool to locate the most relevant data within these files.
       - Analyze the found data to respond to the user's query.
-`,      
+`,
       model: "gpt-4o",
       tools: [{ type: "file_search" }],
     });
@@ -582,11 +582,12 @@ const chat = async (req, res) => {
         title: title,
       });
 
-      await newConversation.save();
-      console.log('Thread created successfully:', thread);
 
+      console.log('Thread created successfully:', thread);
       threadID = thread.id;
-    } 
+      await newConversation.save();
+
+    }
     // Otherwise, append the new user message to the existing thread
     else {
       await openai.beta.threads.messages.create(threadID, {
@@ -618,16 +619,116 @@ const chat = async (req, res) => {
     const response = messages.data.pop();
     const content = response.content[0].text.value;
 
+
+
     console.log('Response from assistant:', content);
 
-    return res.status(200).json({ response: content, threadID });
-  } 
+    return res.status(200).json({ response: content, threadID, title });
+  }
   catch (error) {
     console.error('Error in chat function:', error);
     return res.status(500).json({ error: 'Error processing chat request' });
   }
 };
+const generateTitle = async (req, res) => {
+  try {
+    // 1. Extract relevant data from the request body
+    const { firebaseUid, query } = req.body;
 
+    // 2. Fetch user from DB to get the right assistant ID
+    const user = await User.findOne({ firebaseUid });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const assistantID = user.assistantID?.dataanalysisID;
+    if (!assistantID) {
+      return res
+        .status(400)
+        .json({ error: 'Assistant ID not found for user' });
+    }
+
+    // 3. Create a new thread to ask for a short “title”
+    //    The instruction tells the model to only return the title, no extra fluff
+    const threadTitle = await openai.beta.threads.create({
+      messages: [
+        {
+          role: 'user',
+          content:
+            'Summarize the following query and come up with a title for the query. Only return the title and no other information just the title with no ther words you dont have to label it itle or anything: ' +
+            query,
+        },
+      ],
+    });
+
+    if (!threadTitle || !threadTitle.id) {
+      throw new Error('Thread creation for title generation failed');
+    }
+
+    // 4. Run the thread, waiting for completion
+    const runTitle = await openai.beta.threads.runs.createAndPoll(
+      threadTitle.id,
+      {
+        assistant_id: assistantID,
+        max_completion_tokens: 2000,
+      }
+    );
+
+    if (!runTitle || !runTitle.id) {
+      throw new Error('Run creation for title generation failed');
+    }
+
+    // 5. Retrieve the assistant’s final message
+    const messagesTitle = await openai.beta.threads.messages.list(
+      threadTitle.id,
+      {
+        run_id: runTitle.id,
+      }
+    );
+
+    if (!messagesTitle || messagesTitle.data.length === 0) {
+      throw new Error('No messages returned from the assistant');
+    }
+
+    // The last message in the array should contain the summarized title
+    const responseTitle = messagesTitle.data.pop();
+    const contentTitle = responseTitle.content[0].text.value.trim();
+    console.log('Title generated from assistant:', contentTitle);
+
+    // 6. Return the title to the client
+    return res.status(200).json({ title: contentTitle });
+  } catch (error) {
+    console.error('Error generating title:', error);
+    return res.status(500).json({ error: 'Error generating title' });
+  }
+};
+
+// save title of chat
+const saveTitle = async (req, res) => {
+  try {
+    const { firebaseUid, title, threadID } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    const conversation = await Conversations.findOne({ threadID });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    conversation.title = title;
+    await conversation.save();
+
+    console.log('Title saved successfully:', title);
+
+    return res.status(200).json({ title: title });
+
+  } catch (error) {
+    console.error('Error in saveTitle function:', error);
+    return res.status(500).json({ error: 'Error processing saveTitle request' });
+  }
+}
 // list all messages in a conversation
 const listMessages = async (req, res) => {
   try {
@@ -651,15 +752,99 @@ const listMessages = async (req, res) => {
       throw new Error('No messages returned from the assistant');
     }
 
+    // loop through the messages and extract the content
+
+    const content = [{ text: '' , sender: ''}];
+
+    for (const message of messages.data) {
+      const messageContent = message.content[0].text.value;
+      const sender = message.role;
+      content.push({ text: messageContent, sender: sender });
+    }
+
+
     console.log('Messages:', messages.data);
 
-    return res.status(200).json({ messages: messages.data });
+    return res.status(200).json({ messages: content });
   }
   catch (error) {
     console.error('Error in listMessages function:', error);
     return res.status(500).json({ error: 'Error processing listMessages request' });
   }
 }
+
+// save a conversation insight
+const saveInsight = async (req, res) => {
+  try {
+    const { firebaseUid, threadID, text, data, fileReference } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    const conversation = await Conversations.findOne({ threadID });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const newInsight = {
+      text,
+      data,
+      fileReference,
+    };
+
+    conversation.savedInsights.push(newInsight);
+    await conversation.save();
+
+    return res.status(200).json({ message: 'Insight saved successfully' });
+
+  } catch (error) {
+    console.error('Error in saveInsight function:', error);
+    return res.status(500).json({ error: 'Error processing saveInsight request' });
+  }
+}
+
+// get all insights saved in a conversation
+const getInsights = async (req, res) => {
+  try {
+    const { firebaseUid, threadID } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    const conversation = await Conversations.findOne({ threadID });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    return res.status(200).json({ insights: conversation.savedInsights });
+  }
+  catch (error) {
+    console.error('Error in getInsights function:', error);
+    return res.status(500).json({ error: 'Error processing getInsights request' });
+  }
+}
+
+// get converstations
+const getConversations = async (req, res) => {
+  try {
+    const { firebaseUid } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    const conversations = await Conversations.find({ userID: firebaseUid });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    return res.status(200).json({ conversations: conversations });
+
+  } catch (error) {
+    console.error('Error in getConversations function:', error);
+    return res.status(500).json({ error: 'Error processing getConversations request' });
+  }
+}
+
 
 module.exports = {
   adduser,
@@ -670,4 +855,9 @@ module.exports = {
   deletefile,
   chat,
   listMessages,
+  saveInsight,
+  getInsights,
+  saveTitle,
+  generateTitle,
+  getConversations
 }
