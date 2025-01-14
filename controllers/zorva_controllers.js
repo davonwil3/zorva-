@@ -654,9 +654,7 @@ const generateTitle = async (req, res) => {
       messages: [
         {
           role: 'user',
-          content:
-            'Summarize the following query and come up with a title for the query. Only return the title and no other information just the title with no ther words you dont have to label it itle or anything: ' +
-            query,
+          content: `Provide a title for the following query, summarizing it concisely. Respond only with the title, and do not include any additional words or labels: ${query}`,
         },
       ],
     });
@@ -754,7 +752,7 @@ const listMessages = async (req, res) => {
 
     // loop through the messages and extract the content
 
-    const content = [{ text: '' , sender: ''}];
+    const content = [{ text: '', sender: '' }];
 
     for (const message of messages.data) {
       const messageContent = message.content[0].text.value;
@@ -776,18 +774,23 @@ const listMessages = async (req, res) => {
 // save a conversation insight
 const saveInsight = async (req, res) => {
   try {
-    const { firebaseUid, threadID, text, data, fileReference } = req.body;
-    const user = await User.findOne({ firebaseUid });
+    const { threadID, text, data, fileReference } = req.body;
+
+    // Fetch the conversation
     const conversation = await Conversations.findOne({ threadID });
 
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
     if (!conversation) {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
+    // Find the maximum existing insightID and increment it
+    const maxInsightID =
+      conversation.savedInsights.length > 0
+        ? Math.max(...conversation.savedInsights.map((insight) => insight.insightID || 0))
+        : 0;
+
     const newInsight = {
+      insightID: maxInsightID + 1, // Increment the ID
       text,
       data,
       fileReference,
@@ -796,13 +799,49 @@ const saveInsight = async (req, res) => {
     conversation.savedInsights.push(newInsight);
     await conversation.save();
 
-    return res.status(200).json({ message: 'Insight saved successfully' });
-
+    // Return the newly saved insight
+    const savedInsight = newInsight;
+    return res.status(200).json({ message: 'Insight saved successfully', savedInsight });
   } catch (error) {
     console.error('Error in saveInsight function:', error);
     return res.status(500).json({ error: 'Error processing saveInsight request' });
   }
-}
+};
+
+// delete insight
+const deleteInsight = async (req, res) => {
+  try {
+    const { threadID, insightID } = req.body;
+
+    // Find the conversation by threadID
+    const conversation = await Conversations.findOne({ threadID });
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    // Find the index of the insight to delete
+    const index = conversation.savedInsights.findIndex(
+      (insight) => insight.insightID === Number(insightID) // Ensure numeric comparison
+    );
+
+    if (index === -1) {
+      return res.status(404).json({ error: 'Insight not found' });
+    }
+
+    // Remove the insight from the array
+    conversation.savedInsights.splice(index, 1);
+    await conversation.save();
+
+    console.log('Insight deleted successfully');
+
+    return res.status(200).json({ message: 'Insight deleted successfully' });
+  } catch (error) {
+    console.error('Error in deleteInsight function:', error);
+    return res.status(500).json({ error: 'Error processing deleteInsight request' });
+  }
+};
+
 
 // get all insights saved in a conversation
 const getInsights = async (req, res) => {
@@ -845,6 +884,31 @@ const getConversations = async (req, res) => {
   }
 }
 
+// delete conversation
+const deleteConversation = async (req, res) => {
+  try {
+    const { threadID } = req.body;
+    const conversation = await Conversations.findOne({ threadID });
+
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    // Delete conversation from MongoDB
+    await Conversations.deleteOne({ threadID });
+    // delete conversation from open ai
+    await openai.beta.threads.del(threadID);
+
+    console.log('Conversation deleted successfully');
+    return res.status(200).json({ message: 'Conversation deleted successfully' });
+
+  } catch (error) {
+    console.error('Error in deleteConversation function:', error);
+    return res.status(500).json({ error: 'Error processing deleteConversation request' });
+  }
+}
+
 
 module.exports = {
   adduser,
@@ -859,5 +923,7 @@ module.exports = {
   getInsights,
   saveTitle,
   generateTitle,
-  getConversations
+  getConversations,
+  deleteConversation,
+  deleteInsight
 }

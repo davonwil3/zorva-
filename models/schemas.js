@@ -42,46 +42,53 @@ const UserSchema = new mongoose.Schema({
 
 const ConversationSchema = new mongoose.Schema({
     conversation_id: {
-        type: Number,
-        required: true
+      type: Number,
+      required: true,
     },
     assistantID: {
-        type: String,
-        required: true
+      type: String,
+      required: true,
     },
     userID: {
-        type: String,
-        required: true
+      type: String,
+      required: true,
     },
     threadID: {
-        type: String,
-        required: true
+      type: String,
+      required: true,
     },
     title: {
-        type: String,
-        required: false
+      type: String,
+      required: false,
     },
-    savedInsights: [{
+    savedInsights: [
+      {
+        insightID: {
+          type: Number, // AutoIncrement generates numbers
+          required: false,
+        },
         text: {
-            type: String,
-            required: true
+          type: String,
+          required: true,
         },
         data: {
-            type: String,
-            required: false
+          type: String,
+          required: false,
         },
         fileReference: {
-            type: String,
-            required: false
+          type: String,
+          required: false,
         },
-    }],
+      },
+    ],
     date: {
-        type: Date,
-        default: Date.now
-    }
-});
+      type: Date,
+      default: Date.now,
+    },
+  });
 
 ConversationSchema.plugin(AutoIncrement, { inc_field: 'conversation_id' });
+
 
 const User = mongoose.model('User', UserSchema);
 const Conversations = mongoose.model('Conversation', ConversationSchema);
