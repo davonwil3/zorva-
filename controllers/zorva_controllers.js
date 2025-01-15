@@ -540,34 +540,60 @@ const deletefile = async (req, res) => {
   }
 }
 
-// chat with the assistant
 const chat = async (req, res) => {
   try {
-    const { firebaseUid, query } = req.body;
-    const user = await User.findOne({ firebaseUid });
+    const { firebaseUid, query, title } = req.body;
     let { threadID } = req.body;
-    const title = req.body.title;
+    const uploadedFile = req.file; // Assuming multer processes the uploaded file
 
+    console.log("Received Firebase UID:", firebaseUid);
+    console.log("Query:", query);
+    console.log("Uploaded File:", uploadedFile);
+
+    // Step 1: Find user
+    const user = await User.findOne({ firebaseUid });
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const assistantID = user.assistantID.dataanalysisID;
-
+    const assistantID = user.assistantID?.dataanalysisID;
     if (!assistantID) {
       return res.status(400).json({ error: 'Assistant ID not found for user' });
     }
 
-    // Create a new thread if threadID is missing
+    // Step 2: Upload file to OpenAI if provided
+    let fileID = null;
+    if (uploadedFile) {
+      const fileRes = await openai.files.create({
+        file: fs.createReadStream(uploadedFile.path), // File path processed by multer
+        purpose: "assistants",
+      });
+
+      if (!fileRes || !fileRes.id) {
+        throw new Error('File upload to OpenAI failed');
+      }
+
+      fileID = fileRes.id;
+      console.log('File uploaded successfully:', fileID);
+    }
+
+    // Step 3: Create a new thread if threadID is missing
     if (!threadID) {
-      const thread = await openai.beta.threads.create({
+      const threadPayload = {
         messages: [
           {
             role: 'user',
             content: query,
+            ...(fileID && {
+              attachments: [
+                { file_id: fileID, tools: [{ type: 'file_search' }] },
+              ],
+            }), // Attach the file if it exists
           },
         ],
-      });
+      };
+
+      const thread = await openai.beta.threads.create(threadPayload);
 
       if (!thread || !thread.id) {
         throw new Error('Thread creation failed');
@@ -582,21 +608,27 @@ const chat = async (req, res) => {
         title: title,
       });
 
-
-      console.log('Thread created successfully:', thread);
+      console.log('Thread created successfully:', thread.id);
       threadID = thread.id;
       await newConversation.save();
-
     }
-    // Otherwise, append the new user message to the existing thread
+    // Step 4: Append user message with attachments to the existing thread
     else {
-      await openai.beta.threads.messages.create(threadID, {
+      const messagePayload = {
         role: 'user',
         content: query,
-      });
+        ...(fileID && {
+          attachments: [
+            { file_id: fileID, tools: [{ type: 'file_search' }] },
+          ],
+        }), // Attach the file if it exists
+      };
+
+      const threadMessage = await openai.beta.threads.messages.create(threadID, messagePayload);
+      console.log('Message appended to thread:', threadMessage);
     }
 
-    // Run the thread
+    // Step 5: Run the thread
     const run = await openai.beta.threads.runs.createAndPoll(threadID, {
       assistant_id: assistantID,
       max_completion_tokens: 2000,
@@ -606,7 +638,7 @@ const chat = async (req, res) => {
       throw new Error('Run creation failed');
     }
 
-    // Retrieve the response messages
+    // Step 6: Retrieve the assistant’s response messages
     const messages = await openai.beta.threads.messages.list(threadID, {
       run_id: run.id,
     });
@@ -619,17 +651,16 @@ const chat = async (req, res) => {
     const response = messages.data.pop();
     const content = response.content[0].text.value;
 
-
-
     console.log('Response from assistant:', content);
 
     return res.status(200).json({ response: content, threadID, title });
-  }
-  catch (error) {
+  } catch (error) {
     console.error('Error in chat function:', error);
     return res.status(500).json({ error: 'Error processing chat request' });
   }
 };
+
+
 const generateTitle = async (req, res) => {
   try {
     // 1. Extract relevant data from the request body

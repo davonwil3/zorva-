@@ -22,7 +22,7 @@ const setupRoutes = (upload) => {
     router.post('/getfiles', getfiles);
     router.post('/getfilesbyID', getFilesByID);
     router.post('/deletefile', deletefile);
-    router.post('/chat', chat);
+    router.post('/chat', upload.single('file'), chat);
     router.post('/listMessages', listMessages);
     router.post('/saveInsight', saveInsight);
     router.post('/getInsights', getInsights);
