@@ -268,8 +268,16 @@ const convertToJSON = async (file) => {
     const sheetNames = workbook.SheetNames;
     console.log('Excel Sheet Names:', sheetNames);
 
-    jsonData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetNames[0]]);
-    console.log('Excel Data:', jsonData);
+    // Create a single JSON object containing all sheets
+    const allSheetsData = {};
+    sheetNames.forEach((sheetName) => {
+      const worksheet = workbook.Sheets[sheetName];
+      const sheetData = xlsx.utils.sheet_to_json(worksheet);
+      allSheetsData[sheetName] = sheetData;
+    });
+
+    jsonData = allSheetsData;
+    console.log('All Excel Data:', jsonData);
   } else {
     console.error('Unsupported file format:', fileExtension);
     throw new Error('Unsupported file format');
@@ -646,7 +654,9 @@ const chat = async (req, res) => {
 
     // Extract the assistant’s final message
     const response = messages.data.pop();
-    const contentResponse = response.content[0].text.value;
+    let contentResponse = response.content[0].text.value;
+    contentResponse = contentResponse.replace(/(\[.*?source.*?\])|(\【.*?source.*?\】)|\*/gi, "");
+
 
     console.log("Response from assistant:", contentResponse);
 
@@ -686,7 +696,7 @@ const generateInsights = async (req, res) => {
       messages: [
         {
           role: "user",
-          content: `generate multiple insights for the following files it should be structured as json and only return the array. give detailed insights such as outliers and other data analysis terms -make sure to explain in simple terms. should include a title and description for each object in array. only reference the file given- file Ids: ${fileIDs.join(", ")}`
+          content: `Generate in-depth insights for the following files with ids: ${fileIDs.join(", ")} - should be in json format with each individual insight in the array having a title and description`
           ,
         },
       ],
