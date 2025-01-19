@@ -14,6 +14,7 @@ const {generateTitle} = require('../controllers/zorva_controllers');
 const {getConversations} = require('../controllers/zorva_controllers');
 const { deleteConversation } = require('../controllers/zorva_controllers');
 const { deleteInsight } = require('../controllers/zorva_controllers');
+const { generateInsights} = require('../controllers/zorva_controllers');
 
 const setupRoutes = (upload) => {
     router.post('/adduser', adduser);
@@ -31,6 +32,7 @@ const setupRoutes = (upload) => {
     router.post('/getConversations', getConversations);
     router.delete('/deleteConversation', deleteConversation);
     router.post('/deleteInsight', deleteInsight);
+    router.post('/generateInsights', generateInsights);
     return router;
 };
 

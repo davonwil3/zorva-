@@ -10,6 +10,7 @@ const AWS = require('aws-sdk');
 const mime = require('mime-types');
 const cache = require('./cache');
 const Conversations = require('../models/schemas').Conversations;
+const Message = require('../models/schemas').Message;
 
 
 // Configure AWS SDK
@@ -542,53 +543,44 @@ const deletefile = async (req, res) => {
 
 const chat = async (req, res) => {
   try {
-    const { firebaseUid, query, title } = req.body;
+    const { firebaseUid, query, title, fileIDs } = req.body;
+    const filenames = JSON.parse(req.body.filenames || "[]"); // Parse filenames from the request
     let { threadID } = req.body;
-    const uploadedFile = req.file; // Assuming multer processes the uploaded file
 
     console.log("Received Firebase UID:", firebaseUid);
     console.log("Query:", query);
-    console.log("Uploaded File:", uploadedFile);
+    console.log("File IDs (if provided):", fileIDs);
+    console.log("Filenames (if provided):", filenames);
 
-    // Step 1: Find user
+    // Step 1: Find the user in the database
     const user = await User.findOne({ firebaseUid });
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: "User not found" });
     }
 
     const assistantID = user.assistantID?.dataanalysisID;
     if (!assistantID) {
-      return res.status(400).json({ error: 'Assistant ID not found for user' });
+      return res.status(400).json({ error: "Assistant ID not found for user" });
     }
 
-    // Step 2: Upload file to OpenAI if provided
-    let fileID = null;
-    if (uploadedFile) {
-      const fileRes = await openai.files.create({
-        file: fs.createReadStream(uploadedFile.path), // File path processed by multer
-        purpose: "assistants",
+    // If no fileIDs or query exists, return an error
+    if ((!fileIDs || fileIDs.length === 0) && !query) {
+      return res.status(400).json({
+        error: "No file IDs or query provided. Cannot proceed.",
       });
-
-      if (!fileRes || !fileRes.id) {
-        throw new Error('File upload to OpenAI failed');
-      }
-
-      fileID = fileRes.id;
-      console.log('File uploaded successfully:', fileID);
     }
 
-    // Step 3: Create a new thread if threadID is missing
+    // Combine file IDs into the message content
+    const fileIDsText = fileIDs?.map((id) => `File ID: ${id}`).join(", ") || "";
+    const instructions = `${fileIDsText}\n\n${query || ""}\n\nNote: Do not mention the file IDs in your response.`;
+
+    // Step 2: Create a new thread if threadID is missing
     if (!threadID) {
       const threadPayload = {
         messages: [
           {
-            role: 'user',
-            content: query,
-            ...(fileID && {
-              attachments: [
-                { file_id: fileID, tools: [{ type: 'file_search' }] },
-              ],
-            }), // Attach the file if it exists
+            role: "user",
+            content: instructions, // Use the instructions for OpenAI
           },
         ],
       };
@@ -596,69 +588,141 @@ const chat = async (req, res) => {
       const thread = await openai.beta.threads.create(threadPayload);
 
       if (!thread || !thread.id) {
-        throw new Error('Thread creation failed');
+        throw new Error("Thread creation failed");
       }
 
       // Save the thread to your database
       const newConversation = new Conversations({
-        conversation_id: 1,
+        conversation_id: 1, // Adjust this if you have a specific ID logic
         assistantID: assistantID,
         userID: firebaseUid,
         threadID: thread.id,
         title: title,
       });
 
-      console.log('Thread created successfully:', thread.id);
+      console.log("Thread created successfully:", thread.id);
       threadID = thread.id;
       await newConversation.save();
     }
-    // Step 4: Append user message with attachments to the existing thread
+    // Step 3: Append a user message to the existing thread
     else {
       const messagePayload = {
-        role: 'user',
-        content: query,
-        ...(fileID && {
-          attachments: [
-            { file_id: fileID, tools: [{ type: 'file_search' }] },
-          ],
-        }), // Attach the file if it exists
+        role: "user",
+        content: instructions, // Use the instructions for OpenAI
       };
 
       const threadMessage = await openai.beta.threads.messages.create(threadID, messagePayload);
-      console.log('Message appended to thread:', threadMessage);
+      console.log("Message appended to thread:", threadMessage);
     }
 
-    // Step 5: Run the thread
+    // Save the query, instructions, and filenames to the database
+    const newMessage = new Message({
+      threadID: threadID,
+      role: "user",
+      query: query, // User-visible query
+      content: instructions, // Full instructions sent to OpenAI
+      filenames: filenames.map((file) => file.name), // Save filenames
+    });
+    await newMessage.save();
+
+    // Step 4: Run the thread
     const run = await openai.beta.threads.runs.createAndPoll(threadID, {
       assistant_id: assistantID,
       max_completion_tokens: 2000,
     });
 
     if (!run || !run.id) {
-      throw new Error('Run creation failed');
+      throw new Error("Run creation failed");
+    }
+
+    // Step 5: Retrieve the assistant’s response messages
+    const messages = await openai.beta.threads.messages.list(threadID, {
+      run_id: run.id,
+    });
+
+    if (!messages || messages.data.length === 0) {
+      throw new Error("No messages returned from the assistant");
+    }
+
+    // Extract the assistant’s final message
+    const response = messages.data.pop();
+    const contentResponse = response.content[0].text.value;
+
+    console.log("Response from assistant:", contentResponse);
+
+    // Save the assistant's response to the database
+    const assistantMessage = new Message({
+      threadID: threadID,
+      role: "assistant",
+      query: null, // No query for assistant
+      content: contentResponse, // Full assistant response
+    });
+    await assistantMessage.save();
+
+    return res.status(200).json({ response: contentResponse, threadID, title });
+  } catch (error) {
+    console.error("Error in chat function:", error);
+    return res.status(500).json({ error: "Error processing chat request" });
+  }
+};
+
+// get quick insights by file id
+const generateInsights = async (req, res) => {
+  try {
+    const { firebaseUid, fileIDs } = req.body;
+    const user = await User.findOne({ firebaseUid });
+    const assistantID = user.assistantID?.dataanalysisID;
+    console.log("Request body:", req.body);
+
+    if (!assistantID) {
+      return res.status(400).json({ error: 'Assistant ID not found for user' });
+    }
+    if (!fileIDs || fileIDs.length === 0) {
+      return res.status(400).json({ error: 'No file IDs provided' });
+    }
+
+    // Create a thread for insights
+    const thread = await openai.beta.threads.create({
+      messages: [
+        {
+          role: "user",
+          content: `generate multiple insights for the following files it should be structured as json and only return the array. give detailed insights such as outliers and other data analysis terms -make sure to explain in simple terms. should include a title and description for each object in array. only reference the file given- file Ids: ${fileIDs.join(", ")}`
+          ,
+        },
+      ],
+    });
+    const threadID = thread.id;
+
+    // Run the thread
+    const run = await openai.beta.threads.runs.createAndPoll(threadID, {
+      assistant_id: assistantID,
+      max_completion_tokens: 2000,
+    });
+
+    if (!run || !run.id) {
+      throw new Error("Run creation failed");
     }
 
     // Step 6: Retrieve the assistant’s response messages
     const messages = await openai.beta.threads.messages.list(threadID, {
       run_id: run.id,
     });
-
     if (!messages || messages.data.length === 0) {
-      throw new Error('No messages returned from the assistant');
+      throw new Error("No messages returned from the assistant");
     }
 
     // Extract the assistant’s final message
     const response = messages.data.pop();
-    const content = response.content[0].text.value;
+    const contentResponse = response.content[0].text.value;
+    console.log("Response from assistant:", contentResponse);
+    return res.status(200).json({ response: contentResponse });
 
-    console.log('Response from assistant:', content);
-
-    return res.status(200).json({ response: content, threadID, title });
   } catch (error) {
-    console.error('Error in chat function:', error);
-    return res.status(500).json({ error: 'Error processing chat request' });
+    console.error("Error in generateInsights function:", error);
+    return res.status(500).json({ error: "Error processing generateInsights request" });
   }
-};
+}
+
 
 
 const generateTitle = async (req, res) => {
@@ -762,45 +826,32 @@ const saveTitle = async (req, res) => {
 const listMessages = async (req, res) => {
   try {
     const { firebaseUid, threadID } = req.body;
+
     const user = await User.findOne({ firebaseUid });
-    const assistantID = user.assistantID.dataanalysisID;
-
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    if (!assistantID) {
-      return res.status(400).json({ error: 'Assistant ID not found for user' });
+      return res.status(404).json({ error: "User not found" });
     }
 
-    // retrieve the messages in the thread
-    const messages = await openai.beta.threads.messages.list(threadID, {
-      assistant_id: assistantID,
-    });
+    const messages = await Message.find({ threadID }).sort({ timestamp: 1 });
 
-    if (!messages || messages.data.length === 0) {
-      throw new Error('No messages returned from the assistant');
+    if (!messages || messages.length === 0) {
+      return res.status(404).json({ error: "No messages found in this thread." });
     }
 
-    // loop through the messages and extract the content
+    // Map messages to return only `query` for user messages and full `content` for assistant messages
+    const formattedMessages = messages.map((message) => ({
+      sender: message.role,
+      text: message.role === "user" ? message.query : message.content,
+      filenames: message.role === "user" ? message.filenames || [] : undefined, // Include filenames for user messages
+      timestamp: message.timestamp,
+    }));
 
-    const content = [{ text: '', sender: '' }];
-
-    for (const message of messages.data) {
-      const messageContent = message.content[0].text.value;
-      const sender = message.role;
-      content.push({ text: messageContent, sender: sender });
-    }
-
-
-    console.log('Messages:', messages.data);
-
-    return res.status(200).json({ messages: content });
+    return res.status(200).json({ messages: formattedMessages });
+  } catch (error) {
+    console.error("Error in listMessages function:", error);
+    return res.status(500).json({ error: "Error processing listMessages request" });
   }
-  catch (error) {
-    console.error('Error in listMessages function:', error);
-    return res.status(500).json({ error: 'Error processing listMessages request' });
-  }
-}
+};
 
 // save a conversation insight
 const saveInsight = async (req, res) => {
@@ -956,5 +1007,6 @@ module.exports = {
   generateTitle,
   getConversations,
   deleteConversation,
-  deleteInsight
+  deleteInsight,
+  generateInsights
 }
