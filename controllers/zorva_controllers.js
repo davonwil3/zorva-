@@ -580,7 +580,7 @@ const chat = async (req, res) => {
 
     // Combine file IDs into the message content
     const fileIDsText = fileIDs?.map((id) => `File ID: ${id}`).join(", ") || "";
-    const instructions = `${fileIDsText}\n\n${query || ""}\n\nNote: Do not mention the file IDs in your response.`;
+    const instructions = `files to analyze : ${fileIDsText}\n\n${query || ""}\n\nNote: Do not mention the file IDs in your response.`;
 
     // Step 2: Create a new thread if threadID is missing
     if (!threadID) {
@@ -691,13 +691,16 @@ const generateInsights = async (req, res) => {
       return res.status(400).json({ error: 'No file IDs provided' });
     }
 
+
+
+    let userMessage = `Provide a detailed analysis of DAVON-WILSON - IT..pdf. the response should be in json with an array of insights each containing a title and description`
     // Create a thread for insights
     const thread = await openai.beta.threads.create({
       messages: [
         {
           role: "user",
-          content: `Generate in-depth insights for the following files with ids: ${fileIDs.join(", ")} - should be in json format with each individual insight in the array having a title and description`
-          ,
+          content: userMessage,
+         
         },
       ],
     });
@@ -706,7 +709,7 @@ const generateInsights = async (req, res) => {
     // Run the thread
     const run = await openai.beta.threads.runs.createAndPoll(threadID, {
       assistant_id: assistantID,
-      max_completion_tokens: 2000,
+      max_completion_tokens: 9000,
     });
 
     if (!run || !run.id) {
