@@ -551,8 +551,7 @@ const deletefile = async (req, res) => {
 
 const chat = async (req, res) => {
   try {
-    const { firebaseUid, query, title, fileIDs } = req.body;
-    const filenames = JSON.parse(req.body.filenames || "[]"); // Parse filenames from the request
+    const { firebaseUid, query, title, fileIDs, filenames } = req.body;
     let { threadID } = req.body;
 
     console.log("Received Firebase UID:", firebaseUid);
@@ -580,7 +579,10 @@ const chat = async (req, res) => {
 
     // Combine file IDs into the message content
     const fileIDsText = fileIDs?.map((id) => `File ID: ${id}`).join(", ") || "";
-    const instructions = `files to analyze : ${fileIDsText}\n\n${query || ""}\n\nNote: Do not mention the file IDs in your response.`;
+    const filenamesText = filenames?.map((name) => name.replace(/\.[^/.]+$/, '')).map((name) => `Filename: ${name}`).join(", ") || "";
+    console.log("Filenames text:", filenamesText);
+    
+    const instructions = `files to analyze : ${filenamesText} \n\n ${query || ""}\n\nNote: Do not mention the file IDs in your response.`;
 
     // Step 2: Create a new thread if threadID is missing
     if (!threadID) {
@@ -679,7 +681,7 @@ const chat = async (req, res) => {
 // get quick insights by file id
 const generateInsights = async (req, res) => {
   try {
-    const { firebaseUid, fileIDs } = req.body;
+    const { firebaseUid, fileIDs, filenames } = req.body;
     const user = await User.findOne({ firebaseUid });
     const assistantID = user.assistantID?.dataanalysisID;
     console.log("Request body:", req.body);
@@ -691,9 +693,10 @@ const generateInsights = async (req, res) => {
       return res.status(400).json({ error: 'No file IDs provided' });
     }
 
+    
 
-
-    let userMessage = `Provide a detailed analysis of DAVON-WILSON - IT..pdf. the response should be in json with an array of insights each containing a title and description`
+    const filenamesText = filenames?.map((name) => name.replace(/\.[^/.]+$/, '')).map((name) => `Filename: ${name}`).join(", ") || "";
+    let userMessage = `Provide a detailed analysis of ${filenamesText}. The response should be in JSON with an array of insights at least 8, each containing only  a title and description. the descriptions should be concise and not too long. do not provide any other objeccts except title and description. include trends, averages, and other data analysis terms if warranted`;
     // Create a thread for insights
     const thread = await openai.beta.threads.create({
       messages: [
