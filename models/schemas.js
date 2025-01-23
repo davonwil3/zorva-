@@ -76,7 +76,8 @@ const ConversationSchema = new mongoose.Schema({
         required: false,
       },
       fileReference: {
-        type: String,
+        type: [String],
+        default: [],
         required: false,
       },
     },
@@ -94,6 +95,7 @@ const messageSchema = new mongoose.Schema({
   content: String, // Full content sent to OpenAI (with instructions)
   timestamp: { type: Date, default: Date.now },
   filenames: { type: [String], default: [], required: false },
+  citation: { type: [String], default: [], required: false },
 });
 
 ConversationSchema.plugin(AutoIncrement, { inc_field: 'conversation_id' });

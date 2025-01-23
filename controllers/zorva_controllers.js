@@ -553,12 +553,13 @@ const chat = async (req, res) => {
   try {
     const { firebaseUid, query, fileIDs } = req.body;
     let { threadID, filenames } = req.body;
-  
+
 
     console.log("Received Firebase UID:", firebaseUid);
     console.log("Received query:", query);
-  console.log("Received threadID:", threadID);
-  console.log("Received filenames:", filenames);
+    console.log("Received threadID:", threadID);
+    console.log("Received filenames:", filenames);
+    console.log("Received fileIDs:", fileIDs);
 
     // Step 1: Find the user in the database
     const user = await User.findOne({ firebaseUid });
@@ -582,7 +583,7 @@ const chat = async (req, res) => {
 
     let instructions = filenamesText
       ? `files to analyze: ${filenamesText}\n\n${query || ""}\n\nNote: At the end of the response, respond "Follow Up Questions" followed by 3 follow-up questions as a JSON array like this: [{"question": "Sample question"}].`
-      : query;
+      : query + `Note: At the end of the response, respond "Follow Up Questions" followed by 3 follow-up questions as a JSON array like this: [{"question": "Sample question"}].`;
 
     // Step 2: Create a new thread if threadID is missing
     if (!threadID) {
@@ -601,7 +602,7 @@ const chat = async (req, res) => {
         assistantID: assistantID,
         userID: firebaseUid,
         threadID: thread.id,
-        
+
       });
 
       console.log("Thread created successfully:", thread.id);
@@ -613,7 +614,7 @@ const chat = async (req, res) => {
     }
 
     // Save the query, instructions, and filenames to the database
-   
+
     const newMessage = new Message({
       threadID: threadID,
       role: "user",
@@ -626,6 +627,8 @@ const chat = async (req, res) => {
     // Stream from OpenAI
     let completeResponse = "";
     let questionsArray = undefined;
+    let citations = [];
+    let messageCitations = undefined;
 
     await new Promise((resolve, reject) => {
       openai.beta.threads.runs
@@ -634,41 +637,58 @@ const chat = async (req, res) => {
           max_completion_tokens: 2000,
         })
         .on("messageDone", (event) => {
-          if (event.content && event.content[0]?.type === "text") {
-              const { text } = event.content[0];
-              completeResponse += text.value;
-      
-              // Remove "Follow Up Questions" if it exists
-              completeResponse = completeResponse.replace(/Follow Up Questions[:]?/gi, "").trim();
-      
-              // Check for JSON block in the accumulated response
-              const jsonMatch = completeResponse.match(/```json\s*([\s\S]*?)\s*```/i);
-              if (jsonMatch && jsonMatch[1]) {
-                  try {
-                      // Parse the JSON block and remove it from the response
-                      questionsArray = JSON.parse(jsonMatch[1]);
-                      console.log("Extracted Questions Array:", questionsArray);
-      
-                      completeResponse = completeResponse.replace(jsonMatch[0], "").trim();
-                  } catch (error) {
-                      console.error("Error parsing JSON array:", error);
-                  }
+          if (event.content && Array.isArray(event.content) && event.content.length > 0 && event.content[0]?.type === "text") {
+            const { text } = event.content[0];
+            completeResponse += text.value;
+            messageCitations = event.content[0];
+
+            // Remove "Follow Up Questions" if it exists
+            completeResponse = completeResponse.replace(/Follow Up Questions[:]?/gi, "").trim();
+
+            // Check for JSON block in the accumulated response
+            const jsonMatch = completeResponse.match(/```json\s*([\s\S]*?)\s*```/i);
+            if (jsonMatch && jsonMatch[1]) {
+              try {
+                // Parse the JSON block and remove it from the response
+                questionsArray = JSON.parse(jsonMatch[1]);
+                console.log("Extracted Questions Array:", questionsArray);
+
+                completeResponse = completeResponse.replace(jsonMatch[0], "").trim();
+              } catch (error) {
+                console.error("Error parsing JSON array:", error);
               }
+            }
           }
-      })
-      .on("end", () => {
-        // Regex to preserve ASCII printable characters, line breaks, and specific symbols, excluding * and #
-        completeResponse = completeResponse.replace(/[^\x20-\x7E\n\r]|[*#]/g, (char) => {
-          // Allow specific symbols like $, €, £, and standard punctuation except * and #
-          if (/[\u0024\u00A3\u20AC!"$%&'()+,\-./:;<=>?@[\\\]^_`{|}~]/.test(char)) {
-            return char; // Keep these symbols
+        })
+
+        .on("end", () => {
+          // Clean up the complete response
+          completeResponse = completeResponse.replace(/[^\x20-\x7E\n\r]|[*#]/g, (char) => {
+            // Allow specific symbols like $, €, £, and standard punctuation except * and #
+            if (/[\u0024\u00A3\u20AC!"$%&'()+,\-./:;<=>?@[\\\]^_{|}~]/.test(char)) {
+              return char; // Keep these symbols
+            }
+            return ""; // Remove all other non-ASCII and excluded symbols
+          });
+
+          // Extract citations from the message content
+          if (fileIDs && fileIDs.length > 0) {
+            for (const fileID of fileIDs) {
+              citations.push(fileID);
+            }
+          } else {
+            const annotations = messageCitations?.text.annotations;
+            if (annotations) {
+              for (const citation of annotations) {
+                if (citation.file_citation?.file_id) {
+                  citations.push(citation.file_citation.file_id);
+                }
+              }
+            }
           }
-          return ""; // Remove all other non-ASCII and excluded symbols
-        });
-      
-        resolve();
-      })
-      
+            resolve(); // Resolve the streaming process
+          })
+
         .on("error", reject);
     });
 
@@ -678,6 +698,7 @@ const chat = async (req, res) => {
       role: "assistant",
       query: null,
       content: completeResponse,
+      citation: citations,
     });
     await assistantMessage.save();
 
@@ -686,8 +707,9 @@ const chat = async (req, res) => {
       response: completeResponse, // Cleaned response without JSON block
       threadID,
       questionsArray, // Extracted questions array
+      citations, // Collected file IDs
     });
-
+    console.log("citations:", citations);
     res.write(finalJson);
     res.end();
   } catch (error) {
@@ -863,25 +885,31 @@ const listMessages = async (req, res) => {
   try {
     const { firebaseUid, threadID } = req.body;
 
+    // Step 1: Validate the user
     const user = await User.findOne({ firebaseUid });
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // Step 2: Retrieve messages for the thread
     const messages = await Message.find({ threadID }).sort({ timestamp: 1 });
 
     if (!messages || messages.length === 0) {
       return res.status(404).json({ error: "No messages found in this thread." });
     }
 
-    // Map messages to return only `query` for user messages and full `content` for assistant messages
-    const formattedMessages = messages.map((message) => ({
-      sender: message.role,
-      text: message.role === "user" ? message.query : message.content,
-      filenames: message.role === "user" ? message.filenames || [] : undefined, // Include filenames for user messages
-      timestamp: message.timestamp,
-    }));
+    // Step 3: Format messages to include citations
+    const formattedMessages = messages.map((message) => {
+      return {
+        sender: message.role,
+        text: message.role === "user" ? message.query : message.content, // Use `query` for user messages
+        filenames: message.filenames.length > 0 ? message.filenames : undefined, // Include filenames for user messages
+        fileCitations: message.citation.length > 0 ? message.citation : undefined, // Include citations if available
+        timestamp: message.timestamp,
+      };
+    });
 
+    // Step 4: Send formatted messages back
     return res.status(200).json({ messages: formattedMessages });
   } catch (error) {
     console.error("Error in listMessages function:", error);
