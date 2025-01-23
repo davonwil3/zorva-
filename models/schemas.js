@@ -93,13 +93,7 @@ const messageSchema = new mongoose.Schema({
   query: String, // User-visible query
   content: String, // Full content sent to OpenAI (with instructions)
   timestamp: { type: Date, default: Date.now },
-  filenames:
-    [
-      {
-        type: String,
-        required: false,
-      }
-    ]
+  filenames: { type: [String], default: [], required: false },
 });
 
 ConversationSchema.plugin(AutoIncrement, { inc_field: 'conversation_id' });

@@ -551,13 +551,14 @@ const deletefile = async (req, res) => {
 
 const chat = async (req, res) => {
   try {
-    const { firebaseUid, query, title, fileIDs, filenames } = req.body;
-    let { threadID } = req.body;
+    const { firebaseUid, query, fileIDs } = req.body;
+    let { threadID, filenames } = req.body;
+  
 
     console.log("Received Firebase UID:", firebaseUid);
-    console.log("Query:", query);
-    console.log("File IDs (if provided):", fileIDs);
-    console.log("Filenames (if provided):", filenames);
+    console.log("Received query:", query);
+  console.log("Received threadID:", threadID);
+  console.log("Received filenames:", filenames);
 
     // Step 1: Find the user in the database
     const user = await User.findOne({ firebaseUid });
@@ -570,33 +571,26 @@ const chat = async (req, res) => {
       return res.status(400).json({ error: "Assistant ID not found for user" });
     }
 
-    // If no fileIDs or query exists, return an error
     if ((!fileIDs || fileIDs.length === 0) && !query) {
-      return res.status(400).json({
-        error: "No file IDs or query provided. Cannot proceed.",
-      });
+      return res.status(400).json({ error: "No file IDs or query provided. Cannot proceed." });
     }
 
-    // Combine file IDs into the message content
-    const fileIDsText = fileIDs?.map((id) => `File ID: ${id}`).join(", ") || "";
-    const filenamesText = filenames?.map((name) => name.replace(/\.[^/.]+$/, '')).map((name) => `Filename: ${name}`).join(", ") || "";
-    console.log("Filenames text:", filenamesText);
-    
-    const instructions = `files to analyze : ${filenamesText} \n\n ${query || ""}\n\nNote: Do not mention the file IDs in your response.`;
+    const filenamesText = filenames
+      ?.map((name) => name.replace(/\.[^/.]+$/, ""))
+      .map((name) => `Filename: ${name}`)
+      .join(", ") || "";
+
+    let instructions = filenamesText
+      ? `files to analyze: ${filenamesText}\n\n${query || ""}\n\nNote: At the end of the response, respond "Follow Up Questions" followed by 3 follow-up questions as a JSON array like this: [{"question": "Sample question"}].`
+      : query;
 
     // Step 2: Create a new thread if threadID is missing
     if (!threadID) {
       const threadPayload = {
-        messages: [
-          {
-            role: "user",
-            content: instructions, // Use the instructions for OpenAI
-          },
-        ],
+        messages: [{ role: "user", content: instructions }],
       };
 
       const thread = await openai.beta.threads.create(threadPayload);
-
       if (!thread || !thread.id) {
         throw new Error("Thread creation failed");
       }
@@ -607,74 +601,100 @@ const chat = async (req, res) => {
         assistantID: assistantID,
         userID: firebaseUid,
         threadID: thread.id,
-        title: title,
+        
       });
 
       console.log("Thread created successfully:", thread.id);
       threadID = thread.id;
       await newConversation.save();
-    }
-    // Step 3: Append a user message to the existing thread
-    else {
-      const messagePayload = {
-        role: "user",
-        content: instructions, // Use the instructions for OpenAI
-      };
-
-      const threadMessage = await openai.beta.threads.messages.create(threadID, messagePayload);
-      console.log("Message appended to thread:", threadMessage);
+    } else {
+      const messagePayload = { role: "user", content: instructions };
+      await openai.beta.threads.messages.create(threadID, messagePayload);
     }
 
     // Save the query, instructions, and filenames to the database
+   
     const newMessage = new Message({
       threadID: threadID,
       role: "user",
       query: query, // User-visible query
       content: instructions, // Full instructions sent to OpenAI
-      filenames: filenames.map((file) => file.name), // Save filenames
+      filenames: filenames || [],
     });
     await newMessage.save();
 
-    // Step 4: Run the thread
-    const run = await openai.beta.threads.runs.createAndPoll(threadID, {
-      assistant_id: assistantID,
-      max_completion_tokens: 2000,
+    // Stream from OpenAI
+    let completeResponse = "";
+    let questionsArray = undefined;
+
+    await new Promise((resolve, reject) => {
+      openai.beta.threads.runs
+        .stream(threadID, {
+          assistant_id: assistantID,
+          max_completion_tokens: 2000,
+        })
+        .on("messageDone", (event) => {
+          if (event.content && event.content[0]?.type === "text") {
+              const { text } = event.content[0];
+              completeResponse += text.value;
+      
+              // Remove "Follow Up Questions" if it exists
+              completeResponse = completeResponse.replace(/Follow Up Questions[:]?/gi, "").trim();
+      
+              // Check for JSON block in the accumulated response
+              const jsonMatch = completeResponse.match(/```json\s*([\s\S]*?)\s*```/i);
+              if (jsonMatch && jsonMatch[1]) {
+                  try {
+                      // Parse the JSON block and remove it from the response
+                      questionsArray = JSON.parse(jsonMatch[1]);
+                      console.log("Extracted Questions Array:", questionsArray);
+      
+                      completeResponse = completeResponse.replace(jsonMatch[0], "").trim();
+                  } catch (error) {
+                      console.error("Error parsing JSON array:", error);
+                  }
+              }
+          }
+      })
+      .on("end", () => {
+        // Regex to preserve ASCII printable characters, line breaks, and specific symbols, excluding * and #
+        completeResponse = completeResponse.replace(/[^\x20-\x7E\n\r]|[*#]/g, (char) => {
+          // Allow specific symbols like $, €, £, and standard punctuation except * and #
+          if (/[\u0024\u00A3\u20AC!"$%&'()+,\-./:;<=>?@[\\\]^_`{|}~]/.test(char)) {
+            return char; // Keep these symbols
+          }
+          return ""; // Remove all other non-ASCII and excluded symbols
+        });
+      
+        resolve();
+      })
+      
+        .on("error", reject);
     });
 
-    if (!run || !run.id) {
-      throw new Error("Run creation failed");
-    }
-
-    // Step 5: Retrieve the assistant’s response messages
-    const messages = await openai.beta.threads.messages.list(threadID, {
-      run_id: run.id,
-    });
-
-    if (!messages || messages.data.length === 0) {
-      throw new Error("No messages returned from the assistant");
-    }
-
-    // Extract the assistant’s final message
-    const response = messages.data.pop();
-    let contentResponse = response.content[0].text.value;
-    contentResponse = contentResponse.replace(/(\[.*?source.*?\])|(\【.*?source.*?\】)|\*/gi, "");
-
-
-    console.log("Response from assistant:", contentResponse);
-
-    // Save the assistant's response to the database
+    // Save the assistant's cleaned response to the database
     const assistantMessage = new Message({
       threadID: threadID,
       role: "assistant",
-      query: null, // No query for assistant
-      content: contentResponse, // Full assistant response
+      query: null,
+      content: completeResponse,
     });
     await assistantMessage.save();
 
-    return res.status(200).json({ response: contentResponse, threadID, title });
+    // Send the final JSON response
+    const finalJson = JSON.stringify({
+      response: completeResponse, // Cleaned response without JSON block
+      threadID,
+      questionsArray, // Extracted questions array
+    });
+
+    res.write(finalJson);
+    res.end();
   } catch (error) {
     console.error("Error in chat function:", error);
-    return res.status(500).json({ error: "Error processing chat request" });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Error processing chat request" });
+    }
   }
 };
 
@@ -693,7 +713,7 @@ const generateInsights = async (req, res) => {
       return res.status(400).json({ error: 'No file IDs provided' });
     }
 
-    
+
 
     const filenamesText = filenames?.map((name) => name.replace(/\.[^/.]+$/, '')).map((name) => `Filename: ${name}`).join(", ") || "";
     let userMessage = `Provide a detailed analysis of ${filenamesText}. The response should be in JSON with an array of insights at least 8, each containing only  a title and description. the descriptions should be concise and not too long. do not provide any other objeccts except title and description. include trends, averages, and other data analysis terms if warranted`;
@@ -703,7 +723,7 @@ const generateInsights = async (req, res) => {
         {
           role: "user",
           content: userMessage,
-         
+
         },
       ],
     });
