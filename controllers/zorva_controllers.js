@@ -9,8 +9,13 @@ const path = require('path');
 const AWS = require('aws-sdk');
 const mime = require('mime-types');
 const cache = require('./cache');
+const { text } = require('stream/consumers');
+const { QuickInsights } = require('../models/schemas');
 const Conversations = require('../models/schemas').Conversations;
 const Message = require('../models/schemas').Message;
+const quickInsights = require('../models/schemas').quickInsights;
+const QuickInsightsSavedResponses = require('../models/schemas').QuickInsightsSavedResponses;
+
 
 
 // Configure AWS SDK
@@ -110,6 +115,20 @@ const adduser = async (req, res) => {
 
     console.log("Error adding user:", error);
     res.status(500).send("Error adding user");
+  }
+};
+
+// get user by firebaseUid
+const getUser = async (req, res) => {
+  const { firebaseUid } = req.body;
+  try {
+    const user = await User.findOne({ firebaseUid });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.status(200).json({ user }); // Return the user object inside a 'user' key
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
   }
 };
 
@@ -686,8 +705,8 @@ const chat = async (req, res) => {
               }
             }
           }
-            resolve(); // Resolve the streaming process
-          })
+          resolve(); // Resolve the streaming process
+        })
 
         .on("error", reject);
     });
@@ -723,10 +742,16 @@ const chat = async (req, res) => {
 // get quick insights by file id
 const generateInsights = async (req, res) => {
   try {
-    const { firebaseUid, fileIDs, filenames } = req.body;
+    const { firebaseUid, fileIDs, filenames, } = req.body;
+    let { threadID } = req.body;
     const user = await User.findOne({ firebaseUid });
     const assistantID = user.assistantID?.dataanalysisID;
+
     console.log("Request body:", req.body);
+    console.log("Filenames:", filenames);
+    console.log("fileIDs:", fileIDs);
+    console.log("threadID:", threadID);
+  
 
     if (!assistantID) {
       return res.status(400).json({ error: 'Assistant ID not found for user' });
@@ -734,22 +759,28 @@ const generateInsights = async (req, res) => {
     if (!fileIDs || fileIDs.length === 0) {
       return res.status(400).json({ error: 'No file IDs provided' });
     }
-
-
-
-    const filenamesText = filenames?.map((name) => name.replace(/\.[^/.]+$/, '')).map((name) => `Filename: ${name}`).join(", ") || "";
-    let userMessage = `Provide a detailed analysis of ${filenamesText}. The response should be in JSON with an array of insights at least 8, each containing only  a title and description. the descriptions should be concise and not too long. do not provide any other objeccts except title and description. include trends, averages, and other data analysis terms if warranted`;
+    console.log('file names:', filenames);
+    let userMessage = `find the files with the file name  : ${filenames} and give in depth insights on your findings. Note: The response should be in JSON with an array of insights at least 8, each containing only  a title, description, and the filename associated with that insight.  do not provide any other objeccts except title and description and filenames. make sure you are actually looking inside of the file with that filename do not hallucinate.  give insights such as trends, averages, and other in depth insights `;
     // Create a thread for insights
-    const thread = await openai.beta.threads.create({
-      messages: [
-        {
-          role: "user",
-          content: userMessage,
+    if (!threadID) {
+      isNew = true;
 
-        },
-      ],
-    });
-    const threadID = thread.id;
+      const thread = await openai.beta.threads.create({
+        messages: [
+          {
+            role: "user",
+            content: userMessage,
+          },
+        ],
+      });
+      threadID = thread.id;
+      console.log("Thread created successfully:", thread.id);
+
+      // add a quickInsightsThreadID field to user
+      user.quickInsightsThreadID = threadID;
+      await user.save();
+
+    }
 
     // Run the thread
     const run = await openai.beta.threads.runs.createAndPoll(threadID, {
@@ -773,7 +804,35 @@ const generateInsights = async (req, res) => {
     const response = messages.data.pop();
     const contentResponse = response.content[0].text.value;
     console.log("Response from assistant:", contentResponse);
-    return res.status(200).json({ response: contentResponse });
+
+    // extract the array from response
+    const regex = /\[([\s\S]*)\]/;
+    const match = contentResponse.match(regex);
+    let jsonArray = [];
+    if (match && match[1]) {
+      try {
+        jsonArray = JSON.parse(`[${match[1]}]`);
+      } catch (error) {
+        console.error("Error parsing JSON array:", error);
+        return res.status(500).json({ error: "Error parsing JSON array from assistant response" });
+      }
+    }
+
+    // iterate over json array and create insights
+    const insights = jsonArray.map((item) => ({
+      userID: firebaseUid,
+      assistantID: assistantID,
+      threadID: threadID,
+      title: item.title,
+      text: item.description,
+      filenames: item.filename,
+    }));
+    // Save quick insights to the database and retrieve the saved documents
+    const savedInsights = await QuickInsights.insertMany(insights);
+    console.log("Insights saved to database:", savedInsights);
+
+    return res.status(200).json({ insights: savedInsights, threadID: threadID });
+
 
   } catch (error) {
     console.error("Error in generateInsights function:", error);
@@ -919,40 +978,65 @@ const listMessages = async (req, res) => {
 
 // save a conversation insight
 const saveInsight = async (req, res) => {
-  try {
-    const { threadID, text, data, fileReference } = req.body;
+  const { type } = req.body;
+  if (type === 'chat') {
+    try {
+      const { threadID, text, data, fileReference } = req.body;
 
-    // Fetch the conversation
-    const conversation = await Conversations.findOne({ threadID });
+      // Fetch the conversation
+      const conversation = await Conversations.findOne({ threadID });
 
-    if (!conversation) {
-      return res.status(404).json({ error: 'Conversation not found' });
+      if (!conversation) {
+        return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+      // Find the maximum existing insightID and increment it
+      const maxInsightID =
+        conversation.savedInsights.length > 0
+          ? Math.max(...conversation.savedInsights.map((insight) => insight.insightID || 0))
+          : 0;
+
+      const newInsight = {
+        insightID: maxInsightID + 1, // Increment the ID
+        text,
+        data,
+        fileReference,
+      };
+
+      conversation.savedInsights.push(newInsight);
+      await conversation.save();
+
+      // Return the newly saved insight
+      const savedInsight = newInsight;
+      return res.status(200).json({ message: 'Insight saved successfully', savedInsight });
+    } catch (error) {
+      console.error('Error in saveInsight function:', error);
+      return res.status(500).json({ error: 'Error processing saveInsight request' });
     }
+  } else {
+    try {
+      const { insight, threadID } = req.body;
+      console.log('insight:', insight);
 
-    // Find the maximum existing insightID and increment it
-    const maxInsightID =
-      conversation.savedInsights.length > 0
-        ? Math.max(...conversation.savedInsights.map((insight) => insight.insightID || 0))
-        : 0;
-
-    const newInsight = {
-      insightID: maxInsightID + 1, // Increment the ID
-      text,
-      data,
-      fileReference,
-    };
-
-    conversation.savedInsights.push(newInsight);
-    await conversation.save();
-
-    // Return the newly saved insight
-    const savedInsight = newInsight;
-    return res.status(200).json({ message: 'Insight saved successfully', savedInsight });
-  } catch (error) {
-    console.error('Error in saveInsight function:', error);
-    return res.status(500).json({ error: 'Error processing saveInsight request' });
-  }
-};
+      // save insight into quickInsightsSavedResponses
+      const quickInsight = await QuickInsights.findOne({ insightID: insight.insightID, })
+      const updatedQuickInsight = await QuickInsightsSavedResponses.findOneAndUpdate(
+        { threadID },
+        {
+          $push: { quickInsightsIDs: quickInsight.insightID },
+          $set: { assistantID: quickInsight.assistantID, userID: quickInsight.userID },
+        },
+        { new: true, upsert: true } // Return the updated document, create if not exists
+      );
+      console.log('quick insight saved successfully');
+      return res.status(200).json({ message: 'Quick insight saved successfully' });
+    }
+    catch (error) {
+      console.error('Error in saveInsight function:', error);
+      return res.status(500).json({ error: 'Error processing saveInsight request' });
+    }
+  };
+}
 
 // delete insight
 const deleteInsight = async (req, res) => {
@@ -1072,5 +1156,7 @@ module.exports = {
   getConversations,
   deleteConversation,
   deleteInsight,
-  generateInsights
+  generateInsights,
+  getUser
+
 }
