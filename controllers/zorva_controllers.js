@@ -357,20 +357,20 @@ const getfiles = async (req, res) => {
 // The main function to handle fetching files by ID
 const getFilesByID = async (req, res) => {
   try {
-    const { firebaseUid, fileIDs } = req.body;
+    const { firebaseUid, fileIDs, filenames } = req.body;
 
     // Validate input
-    if (!firebaseUid || !Array.isArray(fileIDs)) {
-      return res.status(400).json({ error: 'Invalid request data' });
+    if (!firebaseUid || !Array.isArray(fileIDs) || !Array.isArray(filenames)) {
+      return res.status(400).json({ error: "Invalid request data" });
     }
 
     // Fetch user based on firebaseUid
     const user = await User.findOne({ firebaseUid });
 
-    console.log('Fetching files for user:', user);
+    console.log("Fetching files for user:", user);
 
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: "User not found" });
     }
 
     // Helper function to get or set signed URL in cache
@@ -387,11 +387,11 @@ const getFilesByID = async (req, res) => {
       console.log(`Cache miss for file ID ${fileId}. Generating new signed URL.`);
 
       // Generate a signed URL with 1-hour expiration
-      const url = s3.getSignedUrl('getObject', {
+      const url = s3.getSignedUrl("getObject", {
         Bucket: process.env.AWS_BUCKET_NAME,
         Key: key,
         Expires: 3600, // 1 hour in seconds
-        ResponseContentDisposition: 'inline',
+        ResponseContentDisposition: "inline",
       });
 
       // Store the signed URL in the cache
@@ -403,12 +403,12 @@ const getFilesByID = async (req, res) => {
 
     // Fetch files from S3 based on fileIDs
     const filesWithMetadata = await Promise.all(
-      fileIDs.map(async (fileId) => {
+      fileIDs.map(async (fileId, index) => {
         const key = `uploads/${fileId}`; // Ensure this matches your S3 object keys
-        console.log('Attempting to fetch file with Key:', key);
+        console.log("Attempting to fetch file with Key:", key);
 
         const params = {
-          Bucket: process.env.AWS_BUCKET_NAME, // Ensure this is set to "zorvauploads"
+          Bucket: process.env.AWS_BUCKET_NAME, // Should match your actual S3 bucket name
           Key: key,
         };
 
@@ -419,18 +419,18 @@ const getFilesByID = async (req, res) => {
           // Get or generate signed URL from cache
           const url = await getSignedUrl(fileId, key);
 
-          console.log('File metadata:', fileData);
-          console.log('Signed URL:', url);
+          console.log("File metadata:", fileData);
+          console.log("Signed URL:", url);
 
           return {
             id: fileId,
-            filename: fileData.Metadata?.filename || fileId, // Assuming you store filename in metadata
-            contentType: fileData.ContentType || 'unknown',
+            filename: filenames[index] || fileId, // Use filename from request or fallback to fileId
+            contentType: fileData.ContentType || "unknown",
             contentLength: fileData.ContentLength || 0,
             data: url, // Return the signed URL
           };
         } catch (err) {
-          if (err.code === 'NotFound') {
+          if (err.code === "NotFound") {
             console.error(`File with ID ${fileId} not found in S3.`);
             throw new Error(`File with ID ${fileId} not found.`);
           } else {
@@ -442,10 +442,13 @@ const getFilesByID = async (req, res) => {
     );
 
     // Respond with the files and their metadata
-    res.status(200).json({ files: filesWithMetadata });
+    return res.status(200).json({
+      multiple: fileIDs.length > 1,
+      files: filesWithMetadata,
+    });
   } catch (error) {
-    console.error('Error fetching files:', error.message);
-    res.status(500).json({ error: error.message || 'An error occurred' });
+    console.error("Error fetching files:", error.message);
+    res.status(500).json({ error: error.message || "An error occurred" });
   }
 };
 
